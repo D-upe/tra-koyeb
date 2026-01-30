@@ -2,6 +2,7 @@
 import os
 import logging
 import asyncio
+from datetime import datetime
 from collections import defaultdict, deque
 from flask import Flask, request
 from dotenv import load_dotenv
@@ -39,12 +40,11 @@ DEFAULT_MODEL = "gemini-2.5-flash"
 BASE_URL = os.getenv('KOYEB_PUBLIC_URL', '').rstrip('/')
 
 # ===== Data Structures =====
-# Suggestions 2 & 5: Enhanced to track Favorites and Context
 user_data = defaultdict(lambda: {
     'history': deque(maxlen=10), 
     'favorites': [],
     'dialect': 'standard',
-    'context_mode': True  # Defaulting to ON for better UX
+    'context_mode': True 
 })
 
 DIALECT_PROMPTS = {
@@ -59,7 +59,9 @@ def get_system_prompt(dialect='standard', context_history=None):
     prompt = f"You are an expert translator for {dialect_desc}.\n"
     
     if context_history:
-        prompt += f"Recent context for reference: {list(context_history)}\n"
+        # Pass context as simple text for the prompt
+        history_list = [h['text'] for h in list(context_history)]
+        prompt += f"Recent context for reference: {history_list}\n"
 
     prompt += """
 STRICT RULES:
@@ -93,8 +95,11 @@ async def translate_text(text: str, user_id: int):
                 response = model.generate_content(text)
                 
                 if response.candidates:
-                    # Suggestion 5: Update context history
-                    user['history'].append(f"User: {text} | AI: {response.text[:50]}...")
+                    # Update local history
+                    user['history'].append({
+                        'text': text,
+                        'time': datetime.now().strftime('%H:%M')
+                    })
                     return response.text
                 return "⚠️ Safety filter blocked this response."
             except Exception:
@@ -103,10 +108,62 @@ async def translate_text(text: str, user_id: int):
 
 # ===== Handlers =====
 
-# Suggestion 1: Dialect Selection via Buttons
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🇩🇿 *Marhba!* I am your Darja assistant.\n\n"
+        "Send any text to begin or use /help to see my commands.", 
+        parse_mode='Markdown'
+    )
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Description of how to use the bot and list of commands."""
+    help_text = (
+        "📖 *How to use this bot:*\n"
+        "• Send **English/French** text to get the Darja translation.\n"
+        "• Send **Arabic script** to get French and English translations.\n"
+        "• Send a **Voice message** to simulate audio processing.\n\n"
+        "✨ *Available Commands:*\n"
+        "/dialect - Change region (Algiers, Oran, etc.)\n"
+        "/history - See your last 10 translations\n"
+        "/saved - View your bookmarked items\n"
+        "/save - Reply to any translation with this to bookmark it\n"
+        "/start - Restart the bot"
+    )
+    await update.message.reply_text(help_text, parse_mode='Markdown')
+
+async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows the user's recent translation requests."""
+    history = user_data[update.effective_user.id]['history']
+    if not history:
+        return await update.message.reply_text("📚 Your history is currently empty.")
+    
+    lines = [f"• `{h['text']}` ({h['time']})" for h in history]
+    await update.message.reply_text("📚 *Recent Translations:*\n\n" + "\n".join(lines), parse_mode='Markdown')
+
+async def save_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Save by replying to a message with /save."""
+    if not update.message.reply_to_message:
+        return await update.message.reply_text("⚠️ Please reply to the message you want to save with /save")
+    
+    text = update.message.reply_to_message.text
+    user = user_data[update.effective_user.id]
+    if text not in user['favorites']:
+        user['favorites'].append(text)
+        await update.message.reply_text("⭐ Translation bookmarked!")
+    else:
+        await update.message.reply_text("✅ Already in your /saved list.")
+
+async def saved_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lists all bookmarked items."""
+    favs = user_data[update.effective_user.id]['favorites']
+    if not favs:
+        return await update.message.reply_text("⭐ Your saved list is empty.")
+    
+    await update.message.reply_text("⭐ *Your Saved Translations:*\n\n" + "\n---\n".join(favs), parse_mode='Markdown')
+
 async def set_dialect(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("Standard 🇩🇿", callback_query_data='dial_standard')],
+        [InlineKeyboardButton("Standard 🇩🇿", callback_data='dial_standard')],
         [InlineKeyboardButton("Algiers 🏙️", callback_data='dial_algiers')],
         [InlineKeyboardButton("Oran 🌅", callback_data='dial_oran')],
         [InlineKeyboardButton("Constantine 🌉", callback_data='dial_constantine')]
@@ -120,8 +177,8 @@ async def dialect_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer(f"Dialect set to {dialect_key.title()}")
     await query.edit_message_text(f"✅ Dialect successfully updated to: **{DIALECT_PROMPTS[dialect_key]}**", parse_mode='Markdown')
 
-# Suggestion 2: Favorites Logic
-async def save_favorite(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the Inline 'Save' button."""
     query = update.callback_query
     user = user_data[update.effective_user.id]
     translation = query.message.text
@@ -131,52 +188,35 @@ async def save_favorite(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await query.answer("Already saved.")
 
-async def list_favorites(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    favs = user_data[update.effective_user.id]['favorites']
-    if not favs:
-        return await update.message.reply_text("You haven't saved any translations yet.")
-    await update.message.reply_text("📋 **Your Favorites:**\n\n" + "\n---\n".join(favs[-5:]), parse_mode='Markdown')
-
-# Suggestion 3: Voice Support (STT Simulation)
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🎙️ Voice detected! Processing audio to Darja text... (This feature is active)")
+    await update.message.reply_text("🎙️ Voice detected! Processing audio to Darja text... (Coming soon)")
 
-# Suggestion 6: Typing Indicators & Feedback
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
     
-    # Send "Typing..." action
     await update.message.chat.send_action(action=constants.ChatAction.TYPING)
     status_msg = await update.message.reply_text("🕒 *Translating...*", parse_mode='Markdown')
     
     try:
         result_text = await translate_text(update.message.text, update.effective_user.id)
-        
-        # Add "Save" button to the result
         keyboard = [[InlineKeyboardButton("⭐ Save", callback_data='save_fav')]]
         await status_msg.edit_text(result_text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception as e:
         logger.error(f"Error: {e}")
         await status_msg.edit_text("❌ Error processing translation.")
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🇩🇿 *Marhba!* I am your Darja assistant.\n\n"
-        "✨ **Commands:**\n"
-        "/dialect - Change region\n"
-        "/favs - View saved items\n\n"
-        "Send any text to begin!", parse_mode='Markdown'
-    )
-
 # ===== PTB Application Setup =====
 ptb_app = Application.builder().token(TELEGRAM_TOKEN).connection_pool_size(20).build()
 
-# Adding all handlers
 ptb_app.add_handler(CommandHandler("start", start))
+ptb_app.add_handler(CommandHandler("help", help_command))
+ptb_app.add_handler(CommandHandler("history", history_command))
+ptb_app.add_handler(CommandHandler("save", save_command))
+ptb_app.add_handler(CommandHandler("saved", saved_command))
 ptb_app.add_handler(CommandHandler("dialect", set_dialect))
-ptb_app.add_handler(CommandHandler("favs", list_favorites))
+
 ptb_app.add_handler(CallbackQueryHandler(dialect_callback, pattern="^dial_"))
-ptb_app.add_handler(CallbackQueryHandler(save_favorite, pattern="^save_fav$"))
+ptb_app.add_handler(CallbackQueryHandler(save_callback, pattern="^save_fav$"))
 ptb_app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
@@ -193,12 +233,14 @@ async def webhook():
         logger.error(f"Webhook Error: {e}")
         return "OK", 200
 
-# Suggestion 7: Global Command Menu Setup
 async def setup_commands(app):
     commands = [
         BotCommand("start", "Restart the bot"),
-        BotCommand("dialect", "Select region (Algiers, Oran...)"),
-        BotCommand("favs", "Show saved translations")
+        BotCommand("help", "How to use & list commands"),
+        BotCommand("dialect", "Change region/dialect"),
+        BotCommand("history", "Show recent translations"),
+        BotCommand("saved", "View bookmarks"),
+        BotCommand("save", "Bookmark a translation (reply to it)")
     ]
     await app.bot.set_my_commands(commands)
 
@@ -211,7 +253,6 @@ def main():
     async def run():
         async with ptb_app:
             await ptb_app.start()
-            # Register Command Menu
             await setup_commands(ptb_app)
             
             if BASE_URL:
