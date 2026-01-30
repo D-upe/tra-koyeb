@@ -1,1 +1,1 @@
-web: gunicorn --bind :$PORT --worker-class uvicorn.workers.UvicornWorker app:flask_app
+web: gunicorn --bind :$PORT --workers 2 --threads 4 app:flask_app
