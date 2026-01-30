@@ -60,22 +60,21 @@ DIALECT_PROMPTS = {
 
 def get_system_prompt(dialect='standard'):
     dialect_desc = DIALECT_PROMPTS.get(dialect, DIALECT_PROMPTS['standard'])
-    return f"""You are an expert Algerian translator. 
-    Target Dialect: {dialect_desc}.
+    return f"""You are an expert translator for {dialect_desc}.
 
-    CRITICAL INSTRUCTIONS:
-    - If input is ARABIC SCRIPT (Darja) -> Provide BOTH French and English translations.
-    - If input is FRENCH or ENGLISH -> Provide the Darja translation in ARABIC SCRIPT.
-    - ALWAYS provide a French translation.
+STRICT RULES:
+1. INPUT = ARABIC SCRIPT -> OUTPUT = French AND English.
+2. INPUT = LATIN SCRIPT -> OUTPUT = Darja (Arabic script) AND French AND English.
+3. YOU MUST ALWAYS PROVIDE A FRENCH TRANSLATION.
 
-    STRICT OUTPUT FORMAT:
-    🔤 **Original:** [text]
-    🇩🇿 **Darja:** [Arabic Script]
-    🗣️ **Pronunciation:** [Latin Script]
-    🇫🇷 **French:** [French Translation]
-    🇬🇧 **English:** [English Translation]
-    💡 **Note:** [Cultural note in English]
-    """
+REQUIRED OUTPUT FORMAT:
+🔤 **Original:** [text]
+🇩🇿 **Darja:** [Arabic script]
+🗣️ **Pronunciation:** [latin characters]
+🇫🇷 **French:** [translation]
+🇬🇧 **English:** [translation]
+💡 **Note:** [cultural explanation in English]
+"""
 
 # ===== Core Functions =====
 def initialize_models():
@@ -127,21 +126,36 @@ async def build_ptb_app():
 
 flask_app = Flask(__name__)
 
+# Replace your current /webhook and bottom of file with this:
+
 @flask_app.route('/webhook', methods=['POST'])
 def webhook():
-    # Since we initialize at startup, ptb_app is guaranteed to exist
-    payload = request.get_json(force=True)
-    update = Update.de_json(payload, ptb_app.bot)
-    asyncio.run(ptb_app.process_update(update))
-    return "OK", 200
+    try:
+        global ptb_app, models
+        # Initialize only if not already done
+        if ptb_app is None:
+            models = initialize_models()
+            # Use a simpler way to run the async initialization
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(build_ptb_app())
+            loop.close()
 
-@flask_app.route('/health')
-def health(): return "OK", 200
-
-# PRE-START LOGIC: This solves the "Send message twice" bug
-# We build the app before the server starts accepting requests
-logger.info("🚀 Performing Eager Initialization...")
-asyncio.run(build_ptb_app())
+        payload = request.get_json(force=True)
+        update = Update.de_json(payload, ptb_app.bot)
+        
+        # Process the update
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(ptb_app.process_update(update))
+        loop.close()
+        
+        return "OK", 200
+    except Exception as e:
+        logger.error(f"Webhook Error: {e}")
+        return "Error", 500
 
 if __name__ == '__main__':
-    flask_app.run(port=8080)
+    # For local testing only
+    port = int(os.environ.get("PORT", 8080))
+    flask_app.run(host='0.0.0.0', port=port)
