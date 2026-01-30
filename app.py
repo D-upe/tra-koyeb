@@ -1,12 +1,10 @@
 # app.py
 import os
 import logging
-import traceback
 import asyncio
-from datetime import datetime
 from collections import defaultdict, deque
 
-from flask import Flask, request, jsonify
+from flask import Flask, request
 from dotenv import load_dotenv
 
 # Telegram imports
@@ -27,6 +25,7 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # ===== Environment & API keys =====
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -81,14 +80,11 @@ def initialize_models():
         )
     return new_models
 
-# Global objects
 models = initialize_models()
-ptb_app = None
 
 async def translate_text(text: str, user_id: int):
     user = user_data[user_id]
     model = models.get(user['dialect'])
-    # Add safety settings to prevent blocked responses
     response = model.generate_content(text)
     if response and response.text:
         return response.text
@@ -96,12 +92,12 @@ async def translate_text(text: str, user_id: int):
 
 # ===== Handlers =====
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text: 
+    if not update.message or not update.message.text:
         return
-        
+
     user_id = update.effective_user.id
     await update.message.chat.send_action(action="typing")
-    
+
     try:
         result_text = await translate_text(update.message.text, user_id)
         await update.message.reply_text(result_text, parse_mode='Markdown')
@@ -112,20 +108,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🇩🇿 *Marhba!* I am ready. Send me Darja, French, or English to translate!")
 
-# ===== App Setup =====
-async def build_ptb_app():
-    global ptb_app
-    if ptb_app: return
-    
-    # Increase connection pool for better performance on Koyeb
-    app = Application.builder().token(TELEGRAM_TOKEN).connection_pool_size(20).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    await app.initialize()
-    ptb_app = app
-    logger.info("✅ PTB Application Initialized")
+# ===== PTB Application (built at import, no async init) =====
+ptb_app = (
+    Application.builder()
+    .token(TELEGRAM_TOKEN)
+    .connection_pool_size(20)
+    .build()
+)
+ptb_app.add_handler(CommandHandler("start", start))
+ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
+# ===== Flask app =====
 flask_app = Flask(__name__)
 
 @flask_app.route('/health')
@@ -133,28 +126,40 @@ def health():
     return "OK", 200
 
 @flask_app.route('/webhook', methods=['POST'])
-def webhook():
+async def webhook():
+    """Put incoming Telegram updates into PTB's queue (same event loop = no threading errors)."""
     try:
-        # Use existing event loop for better efficiency
-        loop = asyncio.get_event_loop()
-        
-        # 1. Ensure app is ready (Prevents first-message-fails bug)
-        if ptb_app is None:
-            loop.run_until_complete(build_ptb_app())
-
-        # 2. Parse the update
         payload = request.get_json(force=True)
         update = Update.de_json(payload, ptb_app.bot)
-        
-        # 3. Process the update asynchronously
-        loop.run_until_complete(ptb_app.process_update(update))
-        
+        await ptb_app.update_queue.put(update)
         return "OK", 200
     except Exception as e:
         logger.error(f"Webhook Error: {e}")
-        return "OK", 200 # Always return 200 so Telegram stops retrying failed updates
+        return "OK", 200
 
-# Force pre-initialization when running locally
+# ===== Run PTB + web server in one event loop (fixes "event loop" / "different thread" errors) =====
+def main():
+    import uvicorn
+    from asgiref.wsgi import WsgiToAsgi
+
+    port = int(os.environ.get("PORT", 8080))
+    asgi_app = WsgiToAsgi(flask_app)
+
+    async def run():
+        async with ptb_app:  # handles initialize() / shutdown()
+            await ptb_app.start()
+            logger.info("✅ PTB + Flask webhook running on same event loop")
+            config = uvicorn.Config(
+                app=asgi_app,
+                host="0.0.0.0",
+                port=port,
+                log_level="info",
+            )
+            server = uvicorn.Server(config)
+            await server.serve()
+            await ptb_app.stop()
+
+    asyncio.run(run())
+
 if __name__ == '__main__':
-    asyncio.run(build_ptb_app())
-    flask_app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
+    main()
