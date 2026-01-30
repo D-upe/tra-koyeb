@@ -1,12 +1,11 @@
+# app.py
 import os
 import logging
 import asyncio
-import tempfile
 from datetime import datetime
 from collections import defaultdict, deque
 from flask import Flask, request
 from dotenv import load_dotenv
-from pydub import AudioSegment
 
 from telegram import (
     Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, 
@@ -67,9 +66,8 @@ def get_system_prompt(dialect='standard', context_history=None):
 STRICT RULES:
 1. IF INPUT IS ARABIC SCRIPT -> PROVIDE FRENCH AND ENGLISH.
 2. IF INPUT IS LATIN SCRIPT -> PROVIDE DARJA (ARABIC SCRIPT) AND FRENCH AND ENGLISH.
-3. IF INPUT IS AUDIO -> TRANSCRIBE THE AUDIO FIRST, THEN TRANSLATE.
 REQUIRED OUTPUT FORMAT:
-🔤 **Original:** [transcription/text]
+🔤 **Original:** [text]
 🇩🇿 **Darja:** [Arabic script]
 🗣️ **Pronunciation:** [latin]
 🇫🇷 **French:** [translation]
@@ -79,33 +77,33 @@ REQUIRED OUTPUT FORMAT:
     return prompt
 
 # ===== Core Functions =====
-async def translate_text(text_or_file, user_id: int, is_audio=False):
+async def translate_text(text: str, user_id: int):
     user = user_data[user_id]
     history = user['history'] if user['context_mode'] else None
     
-    for key in GEMINI_API_KEYS:
-        try:
-            genai.configure(api_key=key)
-            model = genai.GenerativeModel(
-                model_name=DEFAULT_MODEL,
-                system_instruction=get_system_prompt(user['dialect'], history)
-            )
-            
-            if is_audio:
-                response = model.generate_content(["Transcribe and translate this Algerian audio.", text_or_file])
-            else:
-                response = model.generate_content(text_or_file)
-            
-            if response.candidates:
-                user['history'].append({
-                    'text': "🎤 Voice Message" if is_audio else text_or_file[:30],
-                    'time': datetime.now().strftime('%H:%M')
-                })
-                return response.text
-            return "⚠️ Safety filter blocked this response."
-        except Exception as e:
-            logger.error(f"Gemini Error: {e}")
-            continue
+    version_fallback = [DEFAULT_MODEL, "gemini-1.5-flash"]
+    
+    for model_ver in version_fallback:
+        for i, key in enumerate(GEMINI_API_KEYS):
+            try:
+                genai.configure(api_key=key)
+                model = genai.GenerativeModel(
+                    model_name=model_ver,
+                    system_instruction=get_system_prompt(user['dialect'], history)
+                )
+                response = model.generate_content(text)
+                
+                if response.candidates:
+                    # Update local history
+                    user['history'].append({
+                        'text': text,
+                        'time': datetime.now().strftime('%H:%M')
+                    })
+                    return response.text
+                return "⚠️ Safety filter blocked this response."
+            except Exception as e:
+                logger.error(f"Translation error with model {model_ver}: {e}")
+                continue
     return "❌ Connection error with AI."
 
 # ===== Handlers =====
@@ -113,11 +111,12 @@ async def translate_text(text_or_file, user_id: int, is_audio=False):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🇩🇿 *Marhba!* I am your Darja assistant.\n\n"
-        "Send text or a **voice message** to begin or use /help to see commands.", 
+        "Send any text to begin or use /help to see my commands.", 
         parse_mode='Markdown'
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Description of how to use the bot and list of commands."""
     help_text = (
         "📖 *How to use this bot:*\n"
         "• Send **English/French** text to get the Darja translation.\n"
@@ -133,15 +132,19 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
 async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shows the user's recent translation requests."""
     history = user_data[update.effective_user.id]['history']
     if not history:
         return await update.message.reply_text("📚 Your history is currently empty.")
+    
     lines = [f"• `{h['text']}` ({h['time']})" for h in history]
     await update.message.reply_text("📚 *Recent Translations:*\n\n" + "\n".join(lines), parse_mode='Markdown')
 
 async def save_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Save by replying to a message with /save."""
     if not update.message.reply_to_message:
         return await update.message.reply_text("⚠️ Please reply to the translation you want to save with /save")
+    
     text = update.message.reply_to_message.text
     user = user_data[update.effective_user.id]
     if text not in user['favorites']:
@@ -151,9 +154,11 @@ async def save_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Already in your /saved list.")
 
 async def saved_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lists all bookmarked items."""
     favs = user_data[update.effective_user.id]['favorites']
     if not favs:
         return await update.message.reply_text("⭐ Your saved list is empty.")
+    
     await update.message.reply_text("⭐ *Your Saved Translations:*\n\n" + "\n---\n".join(favs), parse_mode='Markdown')
 
 async def set_dialect(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -170,9 +175,10 @@ async def dialect_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     dialect_key = query.data.replace('dial_', '')
     user_data[update.effective_user.id]['dialect'] = dialect_key
     await query.answer(f"Dialect set to {dialect_key.title()}")
-    await query.edit_message_text(f"✅ Dialect updated to: **{DIALECT_PROMPTS[dialect_key]}**", parse_mode='Markdown')
+    await query.edit_message_text(f"✅ Dialect successfully updated to: **{DIALECT_PROMPTS[dialect_key]}**", parse_mode='Markdown')
 
 async def save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the Inline 'Save' button."""
     query = update.callback_query
     user = user_data[update.effective_user.id]
     translation = query.message.text
@@ -183,38 +189,14 @@ async def save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("Already saved.")
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    voice = update.message.voice
-    await update.message.chat.send_action(action=constants.ChatAction.RECORD_VOICE)
-    status_msg = await update.message.reply_text("🎤 *Processing your voice...*", parse_mode='Markdown')
-
-    with tempfile.NamedTemporaryFile(suffix='.oga', delete=False) as temp_oga:
-        oga_path = temp_oga.name
-    mp3_path = oga_path.replace('.oga', '.mp3')
-
-    try:
-        new_file = await context.bot.get_file(voice.file_id)
-        await new_file.download_to_drive(oga_path)
-        audio = AudioSegment.from_file(oga_path, format="ogg")
-        audio.export(mp3_path, format="mp3")
-
-        genai.configure(api_key=GEMINI_API_KEYS[0])
-        uploaded_audio = genai.upload_file(path=mp3_path, mime_type="audio/mpeg")
-        result_text = await translate_text(uploaded_audio, user_id, is_audio=True)
-        
-        keyboard = [[InlineKeyboardButton("⭐ Save", callback_data='save_fav')]]
-        await status_msg.edit_text(result_text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
-    except Exception as e:
-        logger.error(f"Voice processing failed: {e}")
-        await status_msg.edit_text("❌ Sorry, I couldn't process that audio.")
-    finally:
-        for path in [oga_path, mp3_path]:
-            if os.path.exists(path): os.remove(path)
+    await update.message.reply_text("🎙️ Voice detected! Preparing audio processing... (Next step implementation)")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
+    
     await update.message.chat.send_action(action=constants.ChatAction.TYPING)
     status_msg = await update.message.reply_text("🕒 *Translating...*", parse_mode='Markdown')
+    
     try:
         result_text = await translate_text(update.message.text, update.effective_user.id)
         keyboard = [[InlineKeyboardButton("⭐ Save", callback_data='save_fav')]]
@@ -272,6 +254,7 @@ def main():
         async with ptb_app:
             await ptb_app.start()
             await setup_commands(ptb_app)
+            
             if BASE_URL:
                 await ptb_app.bot.set_webhook(url=f"{BASE_URL}/webhook")
                 logger.info(f"🚀 Webhook: {BASE_URL}/webhook")
