@@ -3,3 +3,5 @@ python-telegram-bot
 google-generativeai
 python-dotenv
 gunicorn
+uvicorn
+asgiref
