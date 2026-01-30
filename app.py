@@ -1,12 +1,12 @@
 import os
 import logging
 import asyncio
-import tempfile  # Added for audio handling
+import tempfile
 from datetime import datetime
 from collections import defaultdict, deque
 from flask import Flask, request
 from dotenv import load_dotenv
-from pydub import AudioSegment  # Added for OGA to MP3 conversion
+from pydub import AudioSegment
 
 from telegram import (
     Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, 
@@ -92,15 +92,13 @@ async def translate_text(text_or_file, user_id: int, is_audio=False):
             )
             
             if is_audio:
-                # text_or_file is the uploaded file object here
                 response = model.generate_content(["Transcribe and translate this Algerian audio.", text_or_file])
             else:
                 response = model.generate_content(text_or_file)
             
             if response.candidates:
-                # Update local history with the response summary
                 user['history'].append({
-                    'text': "Voice Message" if is_audio else text_or_file[:30],
+                    'text': "🎤 Voice Message" if is_audio else text_or_file[:30],
                     'time': datetime.now().strftime('%H:%M')
                 })
                 return response.text
@@ -115,55 +113,108 @@ async def translate_text(text_or_file, user_id: int, is_audio=False):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🇩🇿 *Marhba!* I am your Darja assistant.\n\n"
-        "Send text or a **voice message** to begin.", 
+        "Send text or a **voice message** to begin or use /help to see commands.", 
         parse_mode='Markdown'
     )
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = (
+        "📖 *How to use this bot:*\n"
+        "• Send **English/French** text to get the Darja translation.\n"
+        "• Send **Arabic script** to get French and English translations.\n"
+        "• Send a **Voice message** to get a transcription and translation.\n\n"
+        "✨ *Available Commands:*\n"
+        "/dialect - Change region (Algiers, Oran, etc.)\n"
+        "/history - See your last 10 translations\n"
+        "/saved - View your bookmarked items\n"
+        "/save - Reply to any translation with this to bookmark it\n"
+        "/start - Restart the bot"
+    )
+    await update.message.reply_text(help_text, parse_mode='Markdown')
+
+async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    history = user_data[update.effective_user.id]['history']
+    if not history:
+        return await update.message.reply_text("📚 Your history is currently empty.")
+    lines = [f"• `{h['text']}` ({h['time']})" for h in history]
+    await update.message.reply_text("📚 *Recent Translations:*\n\n" + "\n".join(lines), parse_mode='Markdown')
+
+async def save_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message.reply_to_message:
+        return await update.message.reply_text("⚠️ Please reply to the translation you want to save with /save")
+    text = update.message.reply_to_message.text
+    user = user_data[update.effective_user.id]
+    if text not in user['favorites']:
+        user['favorites'].append(text)
+        await update.message.reply_text("⭐ Translation bookmarked!")
+    else:
+        await update.message.reply_text("✅ Already in your /saved list.")
+
+async def saved_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    favs = user_data[update.effective_user.id]['favorites']
+    if not favs:
+        return await update.message.reply_text("⭐ Your saved list is empty.")
+    await update.message.reply_text("⭐ *Your Saved Translations:*\n\n" + "\n---\n".join(favs), parse_mode='Markdown')
+
+async def set_dialect(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("Standard 🇩🇿", callback_data='dial_standard')],
+        [InlineKeyboardButton("Algiers 🏙️", callback_data='dial_algiers')],
+        [InlineKeyboardButton("Oran 🌅", callback_data='dial_oran')],
+        [InlineKeyboardButton("Constantine 🌉", callback_data='dial_constantine')]
+    ]
+    await update.message.reply_text("Select your preferred dialect:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def dialect_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    dialect_key = query.data.replace('dial_', '')
+    user_data[update.effective_user.id]['dialect'] = dialect_key
+    await query.answer(f"Dialect set to {dialect_key.title()}")
+    await query.edit_message_text(f"✅ Dialect updated to: **{DIALECT_PROMPTS[dialect_key]}**", parse_mode='Markdown')
+
+async def save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user = user_data[update.effective_user.id]
+    translation = query.message.text
+    if translation not in user['favorites']:
+        user['favorites'].append(translation)
+        await query.answer("⭐ Saved to Favorites!")
+    else:
+        await query.answer("Already saved.")
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     voice = update.message.voice
-    
     await update.message.chat.send_action(action=constants.ChatAction.RECORD_VOICE)
     status_msg = await update.message.reply_text("🎤 *Processing your voice...*", parse_mode='Markdown')
 
-    # Create temporary file paths
     with tempfile.NamedTemporaryFile(suffix='.oga', delete=False) as temp_oga:
         oga_path = temp_oga.name
     mp3_path = oga_path.replace('.oga', '.mp3')
 
     try:
-        # Download and convert
         new_file = await context.bot.get_file(voice.file_id)
         await new_file.download_to_drive(oga_path)
-        
         audio = AudioSegment.from_file(oga_path, format="ogg")
         audio.export(mp3_path, format="mp3")
 
-        # Upload to Gemini File API
         genai.configure(api_key=GEMINI_API_KEYS[0])
         uploaded_audio = genai.upload_file(path=mp3_path, mime_type="audio/mpeg")
-        
-        # Translate
         result_text = await translate_text(uploaded_audio, user_id, is_audio=True)
         
         keyboard = [[InlineKeyboardButton("⭐ Save", callback_data='save_fav')]]
         await status_msg.edit_text(result_text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
-
     except Exception as e:
         logger.error(f"Voice processing failed: {e}")
         await status_msg.edit_text("❌ Sorry, I couldn't process that audio.")
-    
     finally:
-        # Cleanup temporary files
         for path in [oga_path, mp3_path]:
-            if os.path.exists(path):
-                os.remove(path)
+            if os.path.exists(path): os.remove(path)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
     await update.message.chat.send_action(action=constants.ChatAction.TYPING)
     status_msg = await update.message.reply_text("🕒 *Translating...*", parse_mode='Markdown')
-    
     try:
         result_text = await translate_text(update.message.text, update.effective_user.id)
         keyboard = [[InlineKeyboardButton("⭐ Save", callback_data='save_fav')]]
@@ -171,8 +222,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error: {e}")
         await status_msg.edit_text("❌ Error processing translation.")
-
-# ... (Keep all your other command handlers: help, history, save, dialect, etc. here) ...
 
 # ===== PTB Application Setup =====
 ptb_app = Application.builder().token(TELEGRAM_TOKEN).connection_pool_size(20).build()
@@ -223,7 +272,6 @@ def main():
         async with ptb_app:
             await ptb_app.start()
             await setup_commands(ptb_app)
-            
             if BASE_URL:
                 await ptb_app.bot.set_webhook(url=f"{BASE_URL}/webhook")
                 logger.info(f"🚀 Webhook: {BASE_URL}/webhook")
@@ -233,10 +281,7 @@ def main():
             await server.serve()
             await ptb_app.stop()
 
-    async def main_async():
-        await run()
-
-    asyncio.run(main_async())
+    asyncio.run(run())
 
 if __name__ == '__main__':
     main()
