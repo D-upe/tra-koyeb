@@ -36,6 +36,7 @@ GEMINI_API_KEYS = [k for k in raw_keys if k]
 if not TELEGRAM_TOKEN or not GEMINI_API_KEYS:
     raise SystemExit("Missing TELEGRAM_BOT_TOKEN or GEMINI_API_KEY(s)")
 
+# PRESERVED: Your specific version choice
 DEFAULT_MODEL = "gemini-2.5-flash"
 BASE_URL = os.getenv('KOYEB_PUBLIC_URL', '').rstrip('/')
 
@@ -54,12 +55,16 @@ DIALECT_PROMPTS = {
     'constantine': 'Algerian Arabic (Darja) from Constantine region'
 }
 
+# NEW: Utility to handle long messages
+def split_message(text, limit=4000):
+    """Splits text into chunks to fit Telegram's 4096 character limit."""
+    return [text[i:i + limit] for i in range(0, len(text), limit)]
+
 def get_system_prompt(dialect='standard', context_history=None):
     dialect_desc = DIALECT_PROMPTS.get(dialect, DIALECT_PROMPTS['standard'])
     prompt = f"You are an expert translator for {dialect_desc}.\n"
     
     if context_history:
-        # Pass context as simple text for the prompt
         history_list = [h['text'] for h in list(context_history)]
         prompt += f"Recent context for reference: {history_list}\n"
 
@@ -82,6 +87,7 @@ async def translate_text(text: str, user_id: int):
     user = user_data[user_id]
     history = user['history'] if user['context_mode'] else None
     
+    # PRESERVED: Original version fallback list
     version_fallback = [DEFAULT_MODEL, "gemini-1.5-flash", "gemini-3-flash"]
     
     for model_ver in version_fallback:
@@ -95,7 +101,6 @@ async def translate_text(text: str, user_id: int):
                 response = model.generate_content(text)
                 
                 if response.candidates:
-                    # Update local history
                     user['history'].append({
                         'text': text,
                         'time': datetime.now().strftime('%H:%M')
@@ -120,8 +125,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "📖 *How to use this bot:*\n"
         "• Send **English/French** text to get the Darja translation.\n"
-        "• Send **Arabic script** to get French and English translations.\n"
-        "• Send a **Voice message** to simulate audio processing.\n\n"
+        "• Send **Arabic script** to get French and English translations.\n\n"
         "✨ *Available Commands:*\n"
         "/dialect - Change region (Algiers, Oran, etc.)\n"
         "/history - See your last 10 translations\n"
@@ -132,7 +136,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
 async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Shows the user's recent translation requests."""
     history = user_data[update.effective_user.id]['history']
     if not history:
         return await update.message.reply_text("📚 Your history is currently empty.")
@@ -141,7 +144,6 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("📚 *Recent Translations:*\n\n" + "\n".join(lines), parse_mode='Markdown')
 
 async def save_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Save by replying to a message with /save."""
     if not update.message.reply_to_message:
         return await update.message.reply_text("⚠️ Please reply to the message you want to save with /save")
     
@@ -154,7 +156,6 @@ async def save_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Already in your /saved list.")
 
 async def saved_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lists all bookmarked items."""
     favs = user_data[update.effective_user.id]['favorites']
     if not favs:
         return await update.message.reply_text("⭐ Your saved list is empty.")
@@ -178,7 +179,6 @@ async def dialect_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(f"✅ Dialect successfully updated to: **{DIALECT_PROMPTS[dialect_key]}**", parse_mode='Markdown')
 
 async def save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle the Inline 'Save' button."""
     query = update.callback_query
     user = user_data[update.effective_user.id]
     translation = query.message.text
@@ -188,9 +188,6 @@ async def save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await query.answer("Already saved.")
 
-async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🎙️ Voice detected! Processing audio to Darja text... (Coming soon)")
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
     
@@ -199,8 +196,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         result_text = await translate_text(update.message.text, update.effective_user.id)
+        
+        # Split logic for long translations
+        chunks = split_message(result_text)
         keyboard = [[InlineKeyboardButton("⭐ Save", callback_data='save_fav')]]
-        await status_msg.edit_text(result_text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+        
+        for i, chunk in enumerate(chunks):
+            if i == 0:
+                await status_msg.edit_text(chunk, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+            else:
+                await update.message.reply_text(chunk, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+                
     except Exception as e:
         logger.error(f"Error: {e}")
         await status_msg.edit_text("❌ Error processing translation.")
@@ -217,7 +223,7 @@ ptb_app.add_handler(CommandHandler("dialect", set_dialect))
 
 ptb_app.add_handler(CallbackQueryHandler(dialect_callback, pattern="^dial_"))
 ptb_app.add_handler(CallbackQueryHandler(save_callback, pattern="^save_fav$"))
-ptb_app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+# Filter for TEXT only
 ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 flask_app = Flask(__name__)
