@@ -1,6 +1,7 @@
 # app.py
 # Webhook-enabled Flask adapter for your working bot.py logic.
-# Keep python-telegram-bot==20.7 in requirements.txt to avoid compatibility issues.
+# Designed to run under Gunicorn (Koyeb). Keeps bot.py behavior intact.
+# Requirements: see requirements.txt
 
 import os
 import logging
@@ -15,7 +16,7 @@ from functools import wraps
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 
-# Telegram imports
+# Telegram imports (pin python-telegram-bot==20.7 in requirements)
 from telegram import (
     Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup,
     InlineQueryResultArticle, InputTextMessageContent
@@ -28,10 +29,9 @@ from telegram.ext import (
 # Gemini client (kept as in your original)
 import google.generativeai as genai
 
-# 1. Load environment variables
+# ===== Load env & logging =====
 load_dotenv()
 
-# 2. Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO,
@@ -42,7 +42,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# 3. API Key Check
+# ===== Environment & API keys =====
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 GEMINI_API_KEYS = [
     os.getenv('GEMINI_API_KEY'),
@@ -52,18 +52,17 @@ GEMINI_API_KEYS = [
 GEMINI_API_KEYS = [k for k in GEMINI_API_KEYS if k]
 
 if not TELEGRAM_TOKEN or not GEMINI_API_KEYS:
-    logger.error("❌ MISSING KEYS: Check your environment variables (TELEGRAM_BOT_TOKEN / GEMINI_API_KEY*)")
+    logger.error("❌ MISSING KEYS: TELEGRAM_BOT_TOKEN and at least one GEMINI_API_KEY required")
     raise SystemExit("Missing TELEGRAM_BOT_TOKEN or GEMINI_API_KEY(s)")
 
-logger.info(f"✅ Loaded {len(GEMINI_API_KEYS)} Gemini API key(s)")
+logger.info("✅ Loaded %d Gemini API key(s)", len(GEMINI_API_KEYS))
 
-# Track current key and configure genai
 current_api_key_index = 0
 genai.configure(api_key=GEMINI_API_KEYS[current_api_key_index])
 
-# 4. Model & prompts
 MODEL_NAME = os.getenv('GEMINI_MODEL', "gemini-2.5-flash")
 
+# ===== User storage and data =====
 user_data = defaultdict(lambda: {
     'history': deque(maxlen=10),
     'favorites': [],
@@ -147,13 +146,13 @@ For French/English input (Latin script):
 IMPORTANT: Always output Darja translations in ARABIC SCRIPT, never in Latin characters only.
 """
 
-# 5. API Key rotation & model initialization
+# ===== Key rotation & model init =====
 def rotate_api_key():
     global current_api_key_index
     if len(GEMINI_API_KEYS) > 1:
         current_api_key_index = (current_api_key_index + 1) % len(GEMINI_API_KEYS)
         genai.configure(api_key=GEMINI_API_KEYS[current_api_key_index])
-        logger.info(f"🔄 Rotated to API key #{current_api_key_index + 1}")
+        logger.info("🔄 Rotated to API key #%d", current_api_key_index + 1)
         return True
     return False
 
@@ -165,15 +164,14 @@ def initialize_models():
                 model_name=MODEL_NAME,
                 system_instruction=get_system_prompt(dialect)
             )
-            logger.info(f"✅ Initialized model for {dialect} dialect")
+            logger.info("✅ Initialized model for %s dialect", dialect)
         except Exception as e:
-            logger.error(f"❌ Failed to initialize {dialect} model: {e}")
+            logger.error("❌ Failed to initialize %s model: %s", dialect, e)
     return models
 
-# Initialize models (recreated on rotation)
 models = initialize_models()
 
-# 6. Retry decorator
+# ===== Retry decorator (unchanged logic) =====
 def retry_on_failure(max_retries=3, delay=2):
     def decorator(func):
         @wraps(func)
@@ -186,7 +184,7 @@ def retry_on_failure(max_retries=3, delay=2):
                     last_error = e
                     error_str = str(e).lower()
                     if 'quota' in error_str or 'rate' in error_str or '429' in error_str or 'resource_exhausted' in error_str:
-                        logger.warning(f"⚠️ Quota/Rate limit hit on attempt {attempt + 1}: {e}")
+                        logger.warning("⚠️ Quota/Rate limit hit on attempt %d: %s", attempt + 1, e)
                         if rotate_api_key():
                             global models
                             models = initialize_models()
@@ -195,17 +193,17 @@ def retry_on_failure(max_retries=3, delay=2):
                             continue
                     if attempt < max_retries - 1:
                         wait_time = delay * (attempt + 1)
-                        logger.warning(f"Attempt {attempt + 1}/{max_retries} failed: {e}")
-                        logger.info(f"⏳ Waiting {wait_time}s before retry...")
+                        logger.warning("Attempt %d/%d failed: %s", attempt + 1, max_retries, e)
+                        logger.info("⏳ Waiting %ds before retry...", wait_time)
                         await asyncio.sleep(wait_time)
                     else:
-                        logger.error(f"❌ All {max_retries} attempts failed")
+                        logger.error("❌ All %d attempts failed", max_retries)
                         raise last_error
             raise last_error if last_error else Exception("Unknown error")
         return wrapper
     return decorator
 
-# 7. Translation function (keeps semantics from bot.py)
+# ===== Translation function (keeps bot.py semantics) =====
 @retry_on_failure(max_retries=3, delay=2)
 async def translate_text(text: str, user_id: int, include_context=False) -> dict:
     start_time = time.time()
@@ -214,20 +212,19 @@ async def translate_text(text: str, user_id: int, include_context=False) -> dict
         dialect = user['dialect']
         model = models.get(dialect)
         if not model:
-            logger.error(f"❌ Model not found for dialect: {dialect}")
+            logger.error("❌ Model not found for dialect: %s", dialect)
             raise Exception(f"Model not available for {dialect}")
 
         if include_context and user['context_mode'] and user['context']:
             context_text = "\n".join([f"Previous: {c}" for c in user['context'][-3:]])
             full_text = f"{context_text}\n\nCurrent: {text}"
-            logger.info(f"🧠 Using context with {len(user['context'])} previous messages")
+            logger.info("🧠 Using context with %d previous messages", len(user['context']))
         else:
             full_text = text
 
-        logger.info(f"🔄 Calling Gemini API (Key #{current_api_key_index + 1}) for user {user_id}...")
+        logger.info("🔄 Calling Gemini API (Key #%d) for user %s...", current_api_key_index + 1, user_id)
         response = model.generate_content(full_text)
-
-        result_text = response.text if response.text else "⚠️ Empty response from AI."
+        result_text = response.text if getattr(response, "text", None) else "⚠️ Empty response from AI."
 
         # Update context & stats
         if user['context_mode']:
@@ -242,7 +239,7 @@ async def translate_text(text: str, user_id: int, include_context=False) -> dict
         user['stats']['languages_used'].add(detected_lang)
 
         processing_time = time.time() - start_time
-        logger.info(f"⚡ Processing time: {processing_time:.2f}s")
+        logger.info("⚡ Processing time: %.2fs", processing_time)
 
         return {
             'text': result_text,
@@ -256,7 +253,7 @@ async def translate_text(text: str, user_id: int, include_context=False) -> dict
         logger.error(traceback.format_exc())
         raise
 
-# 8. Handlers (ported from bot.py)
+# ===== Handlers (copied from bot.py behavior) =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🇩🇿 *Marhba! Welcome to Algerian Darja Translator Pro!*", parse_mode='Markdown')
 
@@ -302,7 +299,7 @@ async def save_favorite(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'text': translation_text,
         'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M')
     })
-    logger.info(f"⭐ Favorite saved by user {user_id}")
+    logger.info("⭐ Favorite saved by user %s", user_id)
     await update.message.reply_text("⭐ Translation saved to favorites!")
 
 async def show_favorites(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -335,7 +332,7 @@ async def dialect_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current = user_data[user_id]['dialect']
         await update.message.reply_text(
             f"🗺️ *Current Dialect:* {current.title()}\n\n"
-            f"*Available:* standard, algiers, oran, constantine\n\n"
+            f"*Available:* standard, algiers, orin, constantine\n\n"
             f"Usage: `/dialect oran`",
             parse_mode='Markdown'
         )
@@ -343,7 +340,7 @@ async def dialect_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     dialect = context.args[0].lower()
     if dialect in DIALECT_PROMPTS:
         user_data[user_id]['dialect'] = dialect
-        logger.info(f"🗺️ User {user_id} changed dialect to {dialect}")
+        logger.info("🗺️ User %s changed dialect to %s", user_id, dialect)
         await update.message.reply_text(f"✅ Dialect changed to: {dialect.title()}")
     else:
         await update.message.reply_text("❌ Invalid dialect. Choose: standard, algiers, oran, or constantine")
@@ -412,7 +409,7 @@ async def feedback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         feedback = ' '.join(context.args)
         user_id = update.effective_user.id
         username = update.effective_user.username or "Unknown"
-        logger.info(f"💬 FEEDBACK from @{username} (ID: {user_id}): {feedback}")
+        logger.info("💬 FEEDBACK from @%s (ID: %s): %s", username, user_id, feedback)
         await update.message.reply_text("✅ Thank you for your feedback!")
     else:
         await update.message.reply_text("💬 Usage: /feedback Your message here")
@@ -420,12 +417,11 @@ async def feedback_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     username = update.effective_user.username or "Unknown"
-    logger.info(f"🎤 Voice message received from @{username} (ID: {user_id})")
+    logger.info("🎤 Voice message received from @%s (ID: %s)", username, user_id)
     await update.message.reply_text(
         "🎤 Voice message received!\n\n"
         "⚠️ Voice-to-text feature requires additional setup (Whisper).\n"
-        "For now, please send text messages.\n\n"
-        "Check the VOICE_IMPLEMENTATION_GUIDE.md for setup instructions!"
+        "For now, please send text messages."
     )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -448,11 +444,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         detection_info = f"\n\n🔍 *Detected:* {result['detected_lang']} | *Dialect:* {result['dialect'].title()}"
-        await update.message.reply_text(
-            result['text'] + detection_info,
-            parse_mode='Markdown',
-            reply_markup=reply_markup
-        )
+        await update.message.reply_text(result['text'] + detection_info, parse_mode='Markdown', reply_markup=reply_markup)
     except Exception as e:
         error_msg = str(e).lower()
         if 'quota' in error_msg or 'rate' in error_msg or 'resource_exhausted' in error_msg:
@@ -471,7 +463,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text(
                 "❌ *Translation Failed*\n\n"
-                f"Error: {str(e)[:100]}\n\n"
+                f"Error: {str(e)[:200]}\n\n"
                 "Please try again or contact support if this persists.",
                 parse_mode='Markdown'
             )
@@ -510,7 +502,7 @@ async def inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         await update.inline_query.answer(results, cache_time=10)
     except Exception as e:
-        logger.error(f"Inline query error: {e}")
+        logger.error("Inline query error: %s", e)
 
 async def post_init(application: Application):
     commands = [
@@ -525,23 +517,22 @@ async def post_init(application: Application):
     await application.bot.set_my_commands(commands)
     logger.info("✅ Bot commands registered")
 
-# 9. Delay building the PTB Application until worker runtime to avoid forking issues
-ptb_app = None  # will be created in build_ptb_app() inside worker
+# ===== Build PTB app lazily inside worker =====
+ptb_app = None
 
 async def build_ptb_app():
-    """Create and initialize the Application inside the worker process (idempotent)."""
+    """Idempotent: build and initialize the PTB Application inside worker."""
     global ptb_app
     if not hasattr(build_ptb_app, "_lock"):
         build_ptb_app._lock = asyncio.Lock()
 
     async with build_ptb_app._lock:
         if ptb_app is not None:
-            return  # already initialized by another coroutine
-
+            return
         logger.info("Building PTB Application in worker process...")
         app = Application.builder().token(TELEGRAM_TOKEN).connection_pool_size(8).post_init(post_init).build()
 
-        # Register handlers exactly as in polling bot.py
+        # Register handlers
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("help", help_command))
         app.add_handler(CommandHandler("history", history_command))
@@ -559,21 +550,20 @@ async def build_ptb_app():
         app.add_handler(CallbackQueryHandler(button_callback))
         app.add_handler(InlineQueryHandler(inline_query))
 
-        # Initialize internals (does not start polling)
         await app.initialize()
         ptb_app = app
         logger.info("PTB Application built and initialized in worker.")
 
-        # Optionally set webhook if TELEGRAM_WEBHOOK_URL is provided
+        # Optionally set webhook if provided
         webhook_url = os.getenv('TELEGRAM_WEBHOOK_URL')
         if webhook_url:
             try:
                 await ptb_app.bot.set_webhook(webhook_url)
-                logger.info(f"✅ Webhook set to: {webhook_url}")
+                logger.info("✅ Webhook set to: %s", webhook_url)
             except Exception as e:
-                logger.error(f"❌ Failed to set webhook at initialization: {e}")
+                logger.error("❌ Failed to set webhook at initialization: %s", e)
 
-# 10. Flask App and webhook route (synchronous wrapper for Gunicorn)
+# ===== Flask app & routes =====
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
@@ -586,8 +576,8 @@ def health():
 
 @flask_app.route('/debug_translate', methods=['GET'])
 def debug_translate():
-    """Quick check to verify Gemini call works. Returns a short sample translation result or error."""
-    test_text = os.environ.get('DEBUG_TEST_TEXT', 'صباح الخير')  # default sample Darja
+    """Quick check to verify Gemini call works."""
+    test_text = os.environ.get('DEBUG_TEST_TEXT', 'صباح الخير')
     try:
         global models
         if ptb_app is None:
@@ -603,8 +593,8 @@ def debug_translate():
 
 @flask_app.route('/webhook', methods=['POST'])
 def webhook():
-    """Synchronous webhook wrapper for Gunicorn. Ensures PTB app is built in this worker
-    and runs the async process_update via asyncio.run for compatibility."""
+    """Synchronous webhook wrapper for Gunicorn/Koyeb. Initializes the PTB app inside this worker
+    and processes the incoming update synchronously via asyncio.run."""
     try:
         global models
         if ptb_app is None:
@@ -613,20 +603,16 @@ def webhook():
 
         payload = request.get_json(force=True)
         update = Update.de_json(payload, ptb_app.bot)
-
-        # process_update is async; run it synchronously here
         asyncio.run(ptb_app.process_update(update))
-
         return "OK", 200
     except Exception as e:
-        logger.error(f"Webhook processing error: {e}")
+        logger.error("Webhook processing error: %s", e)
         logger.error(traceback.format_exc())
         return "Error", 500
 
-# 11. If you want to run locally (not needed in Gunicorn), you can initialize and run Flask dev server
+# ===== Local debug entrypoint (not used in Gunicorn) =====
 if __name__ == '__main__':
-    logger.info("Starting local Flask server for debug.")
+    logger.info("Starting local Flask debug server.")
     port = int(os.environ.get("PORT", 8080))
-    # Build PTB locally (blocking until ready)
     asyncio.run(build_ptb_app())
     flask_app.run(host='0.0.0.0', port=port)
