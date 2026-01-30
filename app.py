@@ -1,5 +1,6 @@
-# Adapted webhook-enabled app.py (merged from bot.py logic)
-# Requirements: flask, python-telegram-bot==20.7, google-generativeai, python-dotenv, gunicorn
+# app.py
+# Webhook-enabled Flask adapter for your working bot.py logic.
+# Keep python-telegram-bot==20.7 in requirements.txt to avoid compatibility issues.
 
 import os
 import logging
@@ -24,12 +25,13 @@ from telegram.ext import (
     InlineQueryHandler, filters, ContextTypes
 )
 
+# Gemini client (keep as-is; consider migrating to google.genai later)
 import google.generativeai as genai
 
 # 1. Load environment variables
 load_dotenv()
 
-# 2. Configure logging (ENHANCED)
+# 2. Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO,
@@ -50,11 +52,12 @@ GEMINI_API_KEYS = [
 GEMINI_API_KEYS = [k for k in GEMINI_API_KEYS if k]
 
 if not TELEGRAM_TOKEN or not GEMINI_API_KEYS:
-    logger.error("❌ MISSING KEYS: Check your environment variables")
+    logger.error("❌ MISSING KEYS: Check your environment variables (TELEGRAM_BOT_TOKEN / GEMINI_API_KEY*)")
     raise SystemExit("Missing TELEGRAM_BOT_TOKEN or GEMINI_API_KEY(s)")
 
 logger.info(f"✅ Loaded {len(GEMINI_API_KEYS)} Gemini API key(s)")
 
+# Track current key and configure genai
 current_api_key_index = 0
 genai.configure(api_key=GEMINI_API_KEYS[current_api_key_index])
 
@@ -167,6 +170,7 @@ def initialize_models():
             logger.error(f"❌ Failed to initialize {dialect} model: {e}")
     return models
 
+# Initialize models (lightweight creation at import is fine; model objects are re-created on rotation)
 models = initialize_models()
 
 # 6. Retry decorator
@@ -201,6 +205,7 @@ def retry_on_failure(max_retries=3, delay=2):
         return wrapper
     return decorator
 
+# 7. Translation function (keeps semantics from bot.py)
 @retry_on_failure(max_retries=3, delay=2)
 async def translate_text(text: str, user_id: int, include_context=False) -> dict:
     start_time = time.time()
@@ -215,6 +220,7 @@ async def translate_text(text: str, user_id: int, include_context=False) -> dict
         if include_context and user['context_mode'] and user['context']:
             context_text = "\n".join([f"Previous: {c}" for c in user['context'][-3:]])
             full_text = f"{context_text}\n\nCurrent: {text}"
+            logger.info(f"🧠 Using context with {len(user['context'])} previous messages")
         else:
             full_text = text
 
@@ -250,7 +256,7 @@ async def translate_text(text: str, user_id: int, include_context=False) -> dict
         logger.error(traceback.format_exc())
         raise
 
-# 7. Handlers (ported from bot.py with same behavior)
+# 8. Handlers (ported from bot.py)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🇩🇿 *Marhba! Welcome to Algerian Darja Translator Pro!*", parse_mode='Markdown')
 
@@ -422,7 +428,6 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Check the VOICE_IMPLEMENTATION_GUIDE.md for setup instructions!"
     )
 
-# Message handler, inline queries and callbacks (same behavior as bot.py)
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     user_id = update.effective_user.id
@@ -520,28 +525,56 @@ async def post_init(application: Application):
     await application.bot.set_my_commands(commands)
     logger.info("✅ Bot commands registered")
 
-# 8. Build PTB application (shared instance)
-ptb_app = Application.builder().token(TELEGRAM_TOKEN).connection_pool_size(8).post_init(post_init).build()
+# 9. Delay building the PTB Application until worker runtime to avoid forking issues
+ptb_app = None  # will be created in build_ptb_app() inside worker
+# attach a lock to the builder function to prevent concurrent initialization
+async def build_ptb_app():
+    """Create and initialize the Application inside the worker process (idempotent)."""
+    global ptb_app
+    # lazily create an async lock attached to this function
+    if not hasattr(build_ptb_app, "_lock"):
+        build_ptb_app._lock = asyncio.Lock()
 
-# Register handlers
-ptb_app.add_handler(CommandHandler("start", start))
-ptb_app.add_handler(CommandHandler("help", help_command))
-ptb_app.add_handler(CommandHandler("history", history_command))
-ptb_app.add_handler(CommandHandler("save", save_favorite))
-ptb_app.add_handler(CommandHandler("saved", show_favorites))
-ptb_app.add_handler(CommandHandler("stats", stats_command))
-ptb_app.add_handler(CommandHandler("dialect", dialect_command))
-ptb_app.add_handler(CommandHandler("context", context_command))
-ptb_app.add_handler(CommandHandler("examples", examples_command))
-ptb_app.add_handler(CommandHandler("daily", daily_phrase_command))
-ptb_app.add_handler(CommandHandler("notify", notify_command))
-ptb_app.add_handler(CommandHandler("feedback", feedback_command))
-ptb_app.add_handler(MessageHandler(filters.VOICE, handle_voice))
-ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-ptb_app.add_handler(CallbackQueryHandler(button_callback))
-ptb_app.add_handler(InlineQueryHandler(inline_query))
+    async with build_ptb_app._lock:
+        if ptb_app is not None:
+            return  # already initialized by another coroutine
 
-# 9. Flask App and webhook route
+        logger.info("Building PTB Application in worker process...")
+        app = Application.builder().token(TELEGRAM_TOKEN).connection_pool_size(8).post_init(post_init).build()
+
+        # Register handlers exactly as in polling bot.py
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("help", help_command))
+        app.add_handler(CommandHandler("history", history_command))
+        app.add_handler(CommandHandler("save", save_favorite))
+        app.add_handler(CommandHandler("saved", show_favorites))
+        app.add_handler(CommandHandler("stats", stats_command))
+        app.add_handler(CommandHandler("dialect", dialect_command))
+        app.add_handler(CommandHandler("context", context_command))
+        app.add_handler(CommandHandler("examples", examples_command))
+        app.add_handler(CommandHandler("daily", daily_phrase_command))
+        app.add_handler(CommandHandler("notify", notify_command))
+        app.add_handler(CommandHandler("feedback", feedback_command))
+        app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        app.add_handler(CallbackQueryHandler(button_callback))
+        app.add_handler(InlineQueryHandler(inline_query))
+
+        # Initialize internals (does not start polling)
+        await app.initialize()
+        ptb_app = app
+        logger.info("PTB Application built and initialized in worker.")
+
+        # Optionally set webhook if TELEGRAM_WEBHOOK_URL is provided
+        webhook_url = os.getenv('TELEGRAM_WEBHOOK_URL')
+        if webhook_url:
+            try:
+                await ptb_app.bot.set_webhook(webhook_url)
+                logger.info(f"✅ Webhook set to: {webhook_url}")
+            except Exception as e:
+                logger.error(f"❌ Failed to set webhook at initialization: {e}")
+
+# 10. Flask App and webhook route
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
@@ -552,6 +585,13 @@ def index():
 async def webhook():
     """Handle incoming Telegram updates forwarded by Telegram to our webhook."""
     try:
+        # Ensure PTB app (and models) are initialized inside this worker
+        if ptb_app is None:
+            # reinitialize models (in case env changed) and build the PTB app
+            global models
+            models = initialize_models()
+            await build_ptb_app()
+
         payload = request.get_json(force=True)
         update = Update.de_json(payload, ptb_app.bot)
         # Process update with the running Application
@@ -562,33 +602,11 @@ async def webhook():
         logger.error(traceback.format_exc())
         return "Error", 500
 
-# 10. Initialization helper (initialize PTB and set Telegram webhook if provided)
-async def initialize_bot():
-    logger.info("Initializing bot application and models...")
-    # (re)initialize models if necessary
-    global models
-    models = initialize_models()
-    await ptb_app.initialize()
-    webhook_url = os.getenv('TELEGRAM_WEBHOOK_URL')
-    if webhook_url:
-        try:
-            await ptb_app.bot.set_webhook(webhook_url)
-            logger.info(f"✅ Webhook set to: {webhook_url}")
-        except Exception as e:
-            logger.error(f"❌ Failed to set webhook: {e}")
-    else:
-        logger.warning("No TELEGRAM_WEBHOOK_URL set. Webhook not configured; bot will not receive updates from Telegram.")
-
-# Run initialization at import / start time so container is ready when requests arrive
-try:
-    asyncio.get_event_loop().run_until_complete(initialize_bot())
-except RuntimeError:
-    # In some environments there is no running event loop; create and run one
-    asyncio.run(initialize_bot())
-
-# If running locally for debugging, you can use: flask_app.run(host='0.0.0.0', port=8080)
-# In production on Koyeb/Gunicorn, run the module with gunicorn:
-# gunicorn -w 4 -b 0.0.0.0:8080 "app:flask_app"
+# 11. If you want to run locally (not needed in Gunicorn), you can initialize and run Flask dev server
 if __name__ == '__main__':
+    # For local debugging only.
+    logger.info("Starting local Flask server for debug.")
     port = int(os.environ.get("PORT", 8080))
+    # Build PTB locally (blocking until ready)
+    asyncio.run(build_ptb_app())
     flask_app.run(host='0.0.0.0', port=port)
