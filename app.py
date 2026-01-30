@@ -21,14 +21,14 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # ===== Environment & API keys =====
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-# Collect all keys
 raw_keys = [os.getenv(f'GEMINI_API_KEY{suffix}') for suffix in ['', '_2', '_3']]
 GEMINI_API_KEYS = [k for k in raw_keys if k]
 
 if not TELEGRAM_TOKEN or not GEMINI_API_KEYS:
     raise SystemExit("Missing TELEGRAM_BOT_TOKEN or GEMINI_API_KEY(s)")
 
-MODEL_NAME = os.getenv('GEMINI_MODEL', "gemini-1.5-flash")
+# UPDATED: Set default model to Gemini 2.5 Flash
+DEFAULT_MODEL = "gemini-2.5-flash"
 BASE_URL = os.getenv('KOYEB_PUBLIC_URL', '').rstrip('/')
 
 # ===== Data Structures =====
@@ -58,36 +58,37 @@ REQUIRED OUTPUT FORMAT:
 """
 
 # ===== Core Functions =====
-def get_model(dialect='standard', key_index=0):
-    """Configures and returns a model with a specific API key."""
+def get_model(dialect='standard', key_index=0, model_name=DEFAULT_MODEL):
+    """Configures and returns a model with a specific API key and version."""
     genai.configure(api_key=GEMINI_API_KEYS[key_index])
     return genai.GenerativeModel(
-        model_name=MODEL_NAME,
+        model_name=model_name,
         system_instruction=get_system_prompt(dialect)
     )
 
 async def translate_text(text: str, user_id: int):
     user = user_data[user_id]
     
-    # Try each API key in your list until one works
-    for i, key in enumerate(GEMINI_API_KEYS):
-        try:
-            model = get_model(user['dialect'], key_index=i)
-            response = model.generate_content(text)
-            
-            # Check if the response was blocked by safety filters
-            if response.candidates:
-                return response.text
-            else:
-                return "⚠️ Response blocked by AI safety filters. Please try different wording."
+    # Try different versions in order of preference if the first fails
+    version_fallback = [DEFAULT_MODEL, "gemini-1.5-flash", "gemini-3-flash"]
+    
+    for model_ver in version_fallback:
+        # Try each API key for this specific model version
+        for i, key in enumerate(GEMINI_API_KEYS):
+            try:
+                model = get_model(user['dialect'], key_index=i, model_name=model_ver)
+                response = model.generate_content(text)
                 
-        except Exception as e:
-            logger.error(f"Key {i} failed: {e}")
-            if i == len(GEMINI_API_KEYS) - 1: # If this was the last key
-                raise e # Pass the error up to the handler
-            continue # Try the next key
-            
-    return "⚠️ All API keys are currently busy. Please try again later."
+                if response.candidates:
+                    return response.text
+                else:
+                    return "⚠️ Response blocked by AI safety filters. Please try different wording."
+                    
+            except Exception as e:
+                logger.warning(f"Version {model_ver} with Key {i} failed: {e}")
+                continue # Try next key or next version
+    
+    return "❌ All AI connection attempts failed. Please check API keys or model names."
 
 # ===== Handlers =====
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -101,7 +102,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Connection error with AI. Please check logs.")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🇩🇿 *Marhba!* Send me text to translate!")
+    await update.message.reply_text("🇩🇿 *Marhba!* Bot is ready with Gemini 2.5. Send text to translate!")
 
 # ===== PTB Application =====
 ptb_app = Application.builder().token(TELEGRAM_TOKEN).connection_pool_size(20).build()
@@ -132,7 +133,8 @@ def main():
             await ptb_app.start()
             if BASE_URL:
                 await ptb_app.bot.set_webhook(url=f"{BASE_URL}/webhook")
-                logger.info(f"🚀 Webhook set to: {BASE_URL}/webhook")
+                logger.info(f"🚀 Webhook: {BASE_URL}/webhook")
+            
             config = uvicorn.Config(app=asgi_app, host="0.0.0.0", port=port, log_level="info")
             server = uvicorn.Server(config)
             await server.serve()
