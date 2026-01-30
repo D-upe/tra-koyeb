@@ -3,20 +3,12 @@ import os
 import logging
 import asyncio
 from collections import defaultdict, deque
-
 from flask import Flask, request
 from dotenv import load_dotenv
-
-# Telegram imports
 from telegram import Update
-from telegram.ext import (
-    Application, CommandHandler, MessageHandler, filters, ContextTypes
-)
-
-# Gemini client
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import google.generativeai as genai
 
-# ===== Load env & logging =====
 load_dotenv()
 
 logging.basicConfig(
@@ -29,24 +21,18 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # ===== Environment & API keys =====
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-GEMINI_API_KEYS = [os.getenv(f'GEMINI_API_KEY{suffix}') for suffix in ['', '_2', '_3']]
-GEMINI_API_KEYS = [k for k in GEMINI_API_KEYS if k]
+# Collect all keys
+raw_keys = [os.getenv(f'GEMINI_API_KEY{suffix}') for suffix in ['', '_2', '_3']]
+GEMINI_API_KEYS = [k for k in raw_keys if k]
 
 if not TELEGRAM_TOKEN or not GEMINI_API_KEYS:
     raise SystemExit("Missing TELEGRAM_BOT_TOKEN or GEMINI_API_KEY(s)")
 
-genai.configure(api_key=GEMINI_API_KEYS[0])
 MODEL_NAME = os.getenv('GEMINI_MODEL', "gemini-1.5-flash")
-
-# Get your Koyeb URL from env (you must add this in Koyeb settings)
-# Example: https://your-app-name.koyeb.app
 BASE_URL = os.getenv('KOYEB_PUBLIC_URL', '').rstrip('/')
 
 # ===== Data Structures =====
-user_data = defaultdict(lambda: {
-    'history': deque(maxlen=10),
-    'dialect': 'standard'
-})
+user_data = defaultdict(lambda: {'history': deque(maxlen=10), 'dialect': 'standard'})
 
 DIALECT_PROMPTS = {
     'standard': 'Algerian Arabic (Darja)',
@@ -60,7 +46,7 @@ def get_system_prompt(dialect='standard'):
     return f"""You are an expert translator for {dialect_desc}.
 STRICT RULES:
 1. IF INPUT IS ARABIC SCRIPT -> YOU MUST PROVIDE FRENCH AND ENGLISH TRANSLATIONS.
-2. IF INPUT IS LATIN SCRIPT (FRENCH/ENGLISH) -> YOU MUST PROVIDE THE DARJA TRANSLATION IN ARABIC SCRIPT.
+2. IF INPUT IS LATIN SCRIPT -> YOU MUST PROVIDE THE DARJA TRANSLATION IN ARABIC SCRIPT.
 3. YOU MUST ALWAYS PROVIDE A FRENCH TRANSLATION.
 REQUIRED OUTPUT FORMAT:
 🔤 **Original:** [text]
@@ -72,55 +58,57 @@ REQUIRED OUTPUT FORMAT:
 """
 
 # ===== Core Functions =====
-def initialize_models():
-    new_models = {}
-    for dialect in DIALECT_PROMPTS.keys():
-        new_models[dialect] = genai.GenerativeModel(
-            model_name=MODEL_NAME,
-            system_instruction=get_system_prompt(dialect)
-        )
-    return new_models
-
-models = initialize_models()
+def get_model(dialect='standard', key_index=0):
+    """Configures and returns a model with a specific API key."""
+    genai.configure(api_key=GEMINI_API_KEYS[key_index])
+    return genai.GenerativeModel(
+        model_name=MODEL_NAME,
+        system_instruction=get_system_prompt(dialect)
+    )
 
 async def translate_text(text: str, user_id: int):
     user = user_data[user_id]
-    model = models.get(user['dialect'])
-    response = model.generate_content(text)
-    if response and response.text:
-        return response.text
-    return "⚠️ The AI could not generate a translation."
+    
+    # Try each API key in your list until one works
+    for i, key in enumerate(GEMINI_API_KEYS):
+        try:
+            model = get_model(user['dialect'], key_index=i)
+            response = model.generate_content(text)
+            
+            # Check if the response was blocked by safety filters
+            if response.candidates:
+                return response.text
+            else:
+                return "⚠️ Response blocked by AI safety filters. Please try different wording."
+                
+        except Exception as e:
+            logger.error(f"Key {i} failed: {e}")
+            if i == len(GEMINI_API_KEYS) - 1: # If this was the last key
+                raise e # Pass the error up to the handler
+            continue # Try the next key
+            
+    return "⚠️ All API keys are currently busy. Please try again later."
 
 # ===== Handlers =====
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
-    user_id = update.effective_user.id
     await update.message.chat.send_action(action="typing")
     try:
-        result_text = await translate_text(update.message.text, user_id)
+        result_text = await translate_text(update.message.text, update.effective_user.id)
         await update.message.reply_text(result_text, parse_mode='Markdown')
     except Exception as e:
-        logger.error(f"Translation error: {e}")
-        await update.message.reply_text("❌ AI Error. Please try again.")
+        logger.error(f"Final Translation Error: {e}")
+        await update.message.reply_text("❌ Connection error with AI. Please check logs.")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🇩🇿 *Marhba!* Send me text to translate!")
 
 # ===== PTB Application =====
-ptb_app = (
-    Application.builder()
-    .token(TELEGRAM_TOKEN)
-    .connection_pool_size(20)
-    .build()
-)
+ptb_app = Application.builder().token(TELEGRAM_TOKEN).connection_pool_size(20).build()
 ptb_app.add_handler(CommandHandler("start", start))
 ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 flask_app = Flask(__name__)
-
-@flask_app.route('/health')
-def health():
-    return "OK", 200
 
 @flask_app.route('/webhook', methods=['POST'])
 async def webhook():
@@ -136,22 +124,15 @@ async def webhook():
 def main():
     import uvicorn
     from asgiref.wsgi import WsgiToAsgi
-
     port = int(os.environ.get("PORT", 8080))
     asgi_app = WsgiToAsgi(flask_app)
 
     async def run():
         async with ptb_app:
             await ptb_app.start()
-            
-            # CRITICAL: Tell Telegram where to send updates
             if BASE_URL:
-                webhook_url = f"{BASE_URL}/webhook"
-                await ptb_app.bot.set_webhook(url=webhook_url)
-                logger.info(f"🚀 Webhook set to: {webhook_url}")
-            else:
-                logger.warning("⚠️ KOYEB_PUBLIC_URL not set. Webhook may fail.")
-
+                await ptb_app.bot.set_webhook(url=f"{BASE_URL}/webhook")
+                logger.info(f"🚀 Webhook set to: {BASE_URL}/webhook")
             config = uvicorn.Config(app=asgi_app, host="0.0.0.0", port=port, log_level="info")
             server = uvicorn.Server(config)
             await server.serve()
