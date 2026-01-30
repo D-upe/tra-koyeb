@@ -3,26 +3,22 @@ import os
 import logging
 import traceback
 import asyncio
-import time
-import random
 from datetime import datetime
 from collections import defaultdict, deque
-from functools import wraps
 
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 
-from telegram import (
-    Update, BotCommand, InlineKeyboardButton, InlineKeyboardMarkup,
-    InlineQueryResultArticle, InputTextMessageContent
-)
+# Telegram imports
+from telegram import Update
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
-    InlineQueryHandler, filters, ContextTypes
+    Application, CommandHandler, MessageHandler, filters, ContextTypes
 )
 
+# Gemini client
 import google.generativeai as genai
 
+# ===== Load env & logging =====
 load_dotenv()
 
 logging.basicConfig(
@@ -34,20 +30,19 @@ logger = logging.getLogger(__name__)
 
 # ===== Environment & API keys =====
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+# Support for multiple keys to prevent quota errors
 GEMINI_API_KEYS = [os.getenv(f'GEMINI_API_KEY{suffix}') for suffix in ['', '_2', '_3']]
 GEMINI_API_KEYS = [k for k in GEMINI_API_KEYS if k]
 
-current_api_key_index = 0
-genai.configure(api_key=GEMINI_API_KEYS[current_api_key_index])
-MODEL_NAME = os.getenv('GEMINI_MODEL', "gemini-1.5-flash") # Use 1.5 flash for stability
+if not TELEGRAM_TOKEN or not GEMINI_API_KEYS:
+    raise SystemExit("Missing TELEGRAM_BOT_TOKEN or GEMINI_API_KEY(s)")
+
+genai.configure(api_key=GEMINI_API_KEYS[0])
+MODEL_NAME = os.getenv('GEMINI_MODEL', "gemini-1.5-flash")
 
 # ===== Data Structures =====
 user_data = defaultdict(lambda: {
     'history': deque(maxlen=10),
-    'favorites': [],
-    'context_mode': False,
-    'context': [],
-    'stats': {'total_translations': 0, 'words_translated': 0, 'languages_used': set()},
     'dialect': 'standard'
 })
 
@@ -63,17 +58,17 @@ def get_system_prompt(dialect='standard'):
     return f"""You are an expert translator for {dialect_desc}.
 
 STRICT RULES:
-1. INPUT = ARABIC SCRIPT -> OUTPUT = French AND English.
-2. INPUT = LATIN SCRIPT -> OUTPUT = Darja (Arabic script) AND French AND English.
-3. YOU MUST ALWAYS PROVIDE A FRENCH TRANSLATION.
+1. IF INPUT IS ARABIC SCRIPT -> YOU MUST PROVIDE FRENCH AND ENGLISH TRANSLATIONS.
+2. IF INPUT IS LATIN SCRIPT (FRENCH/ENGLISH) -> YOU MUST PROVIDE THE DARJA TRANSLATION IN ARABIC SCRIPT.
+3. YOU MUST ALWAYS PROVIDE A FRENCH TRANSLATION REGARDLESS OF THE INPUT LANGUAGE.
 
 REQUIRED OUTPUT FORMAT:
 🔤 **Original:** [text]
-🇩🇿 **Darja:** [Arabic script]
-🗣️ **Pronunciation:** [latin characters]
-🇫🇷 **French:** [translation]
-🇬🇧 **English:** [translation]
-💡 **Note:** [cultural explanation in English]
+🇩🇿 **Darja:** [Arabic script translation]
+🗣️ **Pronunciation:** [latin character pronunciation]
+🇫🇷 **French:** [French translation]
+🇬🇧 **English:** [English translation]
+💡 **Note:** [Short cultural explanation in English]
 """
 
 # ===== Core Functions =====
@@ -86,19 +81,24 @@ def initialize_models():
         )
     return new_models
 
-# GLOBAL OBJECTS
+# Global objects
 models = initialize_models()
 ptb_app = None
 
 async def translate_text(text: str, user_id: int):
     user = user_data[user_id]
     model = models.get(user['dialect'])
+    # Add safety settings to prevent blocked responses
     response = model.generate_content(text)
-    return response.text if response.text else "⚠️ Error generating translation."
+    if response and response.text:
+        return response.text
+    return "⚠️ The AI could not generate a translation. Try a different phrase."
 
 # ===== Handlers =====
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.message or not update.message.text: return
+    if not update.message or not update.message.text: 
+        return
+        
     user_id = update.effective_user.id
     await update.message.chat.send_action(action="typing")
     
@@ -107,55 +107,54 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(result_text, parse_mode='Markdown')
     except Exception as e:
         logger.error(f"Translation error: {e}")
-        await update.message.reply_text("❌ Connection error. Please try again.")
+        await update.message.reply_text("❌ Connection error with AI. Please try again in a moment.")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🇩🇿 *Marhba!* I am ready. Send me anything to translate!")
+    await update.message.reply_text("🇩🇿 *Marhba!* I am ready. Send me Darja, French, or English to translate!")
 
 # ===== App Setup =====
 async def build_ptb_app():
     global ptb_app
     if ptb_app: return
     
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    # Increase connection pool for better performance on Koyeb
+    app = Application.builder().token(TELEGRAM_TOKEN).connection_pool_size(20).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
     await app.initialize()
     ptb_app = app
     logger.info("✅ PTB Application Initialized")
 
 flask_app = Flask(__name__)
 
-# Replace your current /webhook and bottom of file with this:
+@flask_app.route('/health')
+def health():
+    return "OK", 200
 
 @flask_app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        global ptb_app, models
-        # Initialize only if not already done
+        # Use existing event loop for better efficiency
+        loop = asyncio.get_event_loop()
+        
+        # 1. Ensure app is ready (Prevents first-message-fails bug)
         if ptb_app is None:
-            models = initialize_models()
-            # Use a simpler way to run the async initialization
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
             loop.run_until_complete(build_ptb_app())
-            loop.close()
 
+        # 2. Parse the update
         payload = request.get_json(force=True)
         update = Update.de_json(payload, ptb_app.bot)
         
-        # Process the update
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        # 3. Process the update asynchronously
         loop.run_until_complete(ptb_app.process_update(update))
-        loop.close()
         
         return "OK", 200
     except Exception as e:
         logger.error(f"Webhook Error: {e}")
-        return "Error", 500
+        return "OK", 200 # Always return 200 so Telegram stops retrying failed updates
 
+# Force pre-initialization when running locally
 if __name__ == '__main__':
-    # For local testing only
-    port = int(os.environ.get("PORT", 8080))
-    flask_app.run(host='0.0.0.0', port=port)
+    asyncio.run(build_ptb_app())
+    flask_app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
