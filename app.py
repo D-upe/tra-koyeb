@@ -36,7 +36,7 @@ GEMINI_API_KEYS = [k for k in raw_keys if k]
 if not TELEGRAM_TOKEN or not GEMINI_API_KEYS:
     raise SystemExit("Missing TELEGRAM_BOT_TOKEN or GEMINI_API_KEY(s)")
 
-DEFAULT_MODEL = "gemini-1.5-flash"
+DEFAULT_MODEL = "gemini-2.5-flash"
 BASE_URL = os.getenv('KOYEB_PUBLIC_URL', '').rstrip('/')
 
 # ===== Data Structures =====
@@ -59,6 +59,7 @@ def get_system_prompt(dialect='standard', context_history=None):
     prompt = f"You are an expert translator for {dialect_desc}.\n"
     
     if context_history:
+        # Pass context as simple text for the prompt
         history_list = [h['text'] for h in list(context_history)]
         prompt += f"Recent context for reference: {history_list}\n"
 
@@ -81,7 +82,7 @@ async def translate_text(text: str, user_id: int):
     user = user_data[user_id]
     history = user['history'] if user['context_mode'] else None
     
-    version_fallback = [DEFAULT_MODEL, "gemini-1.5-flash"]
+    version_fallback = [DEFAULT_MODEL, "gemini-1.5-flash", "gemini-3-flash"]
     
     for model_ver in version_fallback:
         for i, key in enumerate(GEMINI_API_KEYS):
@@ -101,8 +102,7 @@ async def translate_text(text: str, user_id: int):
                     })
                     return response.text
                 return "⚠️ Safety filter blocked this response."
-            except Exception as e:
-                logger.error(f"Translation error with model {model_ver}: {e}")
+            except Exception:
                 continue
     return "❌ Connection error with AI."
 
@@ -121,7 +121,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📖 *How to use this bot:*\n"
         "• Send **English/French** text to get the Darja translation.\n"
         "• Send **Arabic script** to get French and English translations.\n"
-        "• Send a **Voice message** to get a transcription and translation.\n\n"
+        "• Send a **Voice message** to simulate audio processing.\n\n"
         "✨ *Available Commands:*\n"
         "/dialect - Change region (Algiers, Oran, etc.)\n"
         "/history - See your last 10 translations\n"
@@ -143,7 +143,7 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def save_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Save by replying to a message with /save."""
     if not update.message.reply_to_message:
-        return await update.message.reply_text("⚠️ Please reply to the translation you want to save with /save")
+        return await update.message.reply_text("⚠️ Please reply to the message you want to save with /save")
     
     text = update.message.reply_to_message.text
     user = user_data[update.effective_user.id]
@@ -189,7 +189,7 @@ async def save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("Already saved.")
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🎙️ Voice detected! Preparing audio processing... (Next step implementation)")
+    await update.message.reply_text("🎙️ Voice detected! Processing audio to Darja text... (Coming soon)")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text: return
