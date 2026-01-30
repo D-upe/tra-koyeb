@@ -12,7 +12,7 @@ from datetime import datetime
 from collections import defaultdict, deque
 from functools import wraps
 
-from flask import Flask, request
+from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 
 # Telegram imports
@@ -25,7 +25,7 @@ from telegram.ext import (
     InlineQueryHandler, filters, ContextTypes
 )
 
-# Gemini client (keep as-is; consider migrating to google.genai later)
+# Gemini client (kept as in your original)
 import google.generativeai as genai
 
 # 1. Load environment variables
@@ -170,7 +170,7 @@ def initialize_models():
             logger.error(f"❌ Failed to initialize {dialect} model: {e}")
     return models
 
-# Initialize models (lightweight creation at import is fine; model objects are re-created on rotation)
+# Initialize models (recreated on rotation)
 models = initialize_models()
 
 # 6. Retry decorator
@@ -527,11 +527,10 @@ async def post_init(application: Application):
 
 # 9. Delay building the PTB Application until worker runtime to avoid forking issues
 ptb_app = None  # will be created in build_ptb_app() inside worker
-# attach a lock to the builder function to prevent concurrent initialization
+
 async def build_ptb_app():
     """Create and initialize the Application inside the worker process (idempotent)."""
     global ptb_app
-    # lazily create an async lock attached to this function
     if not hasattr(build_ptb_app, "_lock"):
         build_ptb_app._lock = asyncio.Lock()
 
@@ -574,28 +573,50 @@ async def build_ptb_app():
             except Exception as e:
                 logger.error(f"❌ Failed to set webhook at initialization: {e}")
 
-# 10. Flask App and webhook route
+# 10. Flask App and webhook route (synchronous wrapper for Gunicorn)
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
 def index():
     return "Bot (webhook) is running."
 
-@flask_app.route('/webhook', methods=['POST'])
-async def webhook():
-    """Handle incoming Telegram updates forwarded by Telegram to our webhook."""
+@flask_app.route('/health', methods=['GET'])
+def health():
+    return "OK", 200
+
+@flask_app.route('/debug_translate', methods=['GET'])
+def debug_translate():
+    """Quick check to verify Gemini call works. Returns a short sample translation result or error."""
+    test_text = os.environ.get('DEBUG_TEST_TEXT', 'صباح الخير')  # default sample Darja
     try:
-        # Ensure PTB app (and models) are initialized inside this worker
+        global models
         if ptb_app is None:
-            # reinitialize models (in case env changed) and build the PTB app
-            global models
             models = initialize_models()
-            await build_ptb_app()
+            asyncio.run(build_ptb_app())
+        result = asyncio.run(translate_text(test_text, user_id=0, include_context=False))
+        preview = result.get('text', '')[:400] if isinstance(result, dict) else str(result)[:400]
+        return jsonify({"ok": True, "result_preview": preview}), 200
+    except Exception as e:
+        logger.error("Debug translate failed: %s", e)
+        logger.error(traceback.format_exc())
+        return jsonify({"ok": False, "error": str(e)[:400]}), 500
+
+@flask_app.route('/webhook', methods=['POST'])
+def webhook():
+    """Synchronous webhook wrapper for Gunicorn. Ensures PTB app is built in this worker
+    and runs the async process_update via asyncio.run for compatibility."""
+    try:
+        global models
+        if ptb_app is None:
+            models = initialize_models()
+            asyncio.run(build_ptb_app())
 
         payload = request.get_json(force=True)
         update = Update.de_json(payload, ptb_app.bot)
-        # Process update with the running Application
-        await ptb_app.process_update(update)
+
+        # process_update is async; run it synchronously here
+        asyncio.run(ptb_app.process_update(update))
+
         return "OK", 200
     except Exception as e:
         logger.error(f"Webhook processing error: {e}")
@@ -604,7 +625,6 @@ async def webhook():
 
 # 11. If you want to run locally (not needed in Gunicorn), you can initialize and run Flask dev server
 if __name__ == '__main__':
-    # For local debugging only.
     logger.info("Starting local Flask server for debug.")
     port = int(os.environ.get("PORT", 8080))
     # Build PTB locally (blocking until ready)
