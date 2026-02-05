@@ -83,15 +83,19 @@ class Database:
     async def execute(self, query, params=None):
         """Unified execute method for both SQLite and PostgreSQL."""
         query = self._p(query)
-        if self.is_pg:
-            # psycopg 3 execute returns a cursor that can be used directly or as context
-            return await self._connection.execute(query, params)
-        else:
-            return await self._connection.execute(query, params)
+        try:
+            if self.is_pg:
+                return await self._connection.execute(query, params)
+            else:
+                # aiosqlite execute is a coroutine that returns a cursor
+                return await self._connection.execute(query, params)
+        except Exception as e:
+            logger.error(f"Database Error: {e} | Query: {query} | Params: {params}")
+            raise
 
     async def commit(self):
         """Unified commit (PostgreSQL in autocommit mode doesn't need it, but SQLite does)."""
-        if not self.is_pg:
+        if not self.is_pg and self._connection:
             await self._connection.commit()
 
     async def _create_tables(self):
@@ -1356,11 +1360,20 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             await voice_file.download_to_drive(input_path)
             
+            # Check if ffmpeg is installed
+            try:
+                subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                logger.error("FFmpeg is not installed on this system.")
+                await status_msg.edit_text("❌ Audio processing is currently unavailable (FFmpeg missing).")
+                return
+
             # Convert any audio/video format to WAV
             process = subprocess.run(
                 ['ffmpeg', '-y', '-i', input_path, '-ar', '16000', '-ac', '1', wav_path],
                 capture_output=True, text=True
             )
+
             
             if process.returncode != 0:
                 logger.error(f"FFmpeg error: {process.stderr}")

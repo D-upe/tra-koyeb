@@ -49,8 +49,7 @@ async def setup():
     username = input("Enter your Telegram username (without @): ").strip() or None
     
     if is_pg:
-        conn = await psycopg.AsyncConnection.connect(DB_URL)
-        async with conn:
+        async with await psycopg.AsyncConnection.connect(DB_URL) as conn:
             await conn.execute(
                 "INSERT INTO admin_users (user_id, username, can_grant_access) VALUES (%s, %s, 1) "
                 "ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, can_grant_access = 1",
@@ -62,8 +61,10 @@ async def setup():
                 "ON CONFLICT DO NOTHING",
                 (user_id,)
             )
-            await conn.commit()
+            # psycopg 3 connection commits automatically on __aexit__ if no error
     else:
+        # aiosqlite.connect() returns a connection object that is an async context manager
+        # Do NOT await it before using it in 'async with'
         async with aiosqlite.connect(DB_PATH) as conn:
             await conn.execute(
                 "INSERT OR REPLACE INTO admin_users (user_id, username, can_grant_access) VALUES (?, ?, 1)",
