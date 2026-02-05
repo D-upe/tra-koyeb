@@ -1,6 +1,7 @@
 flask
 python-telegram-bot[webhooks]==20.7
 google-generativeai
+openai
 python-dotenv
 asgiref
 uvicorn

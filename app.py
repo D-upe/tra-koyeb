@@ -18,6 +18,7 @@ from telegram.ext import (
     filters, ContextTypes
 )
 import google.generativeai as genai
+from openai import AsyncOpenAI
 
 # ===== Load env & logging =====
 load_dotenv()
@@ -498,9 +499,11 @@ startup_time = datetime.now()
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 raw_keys = [os.getenv(f'GEMINI_API_KEY{suffix}') for suffix in ['', '_2', '_3']]
 GEMINI_API_KEYS = [k for k in raw_keys if k]
+GROK_API_KEY = os.getenv('GROK_API_KEY')
+GROK_MODEL = os.getenv('GROK_MODEL', 'grok-2-latest')
 
-if not TELEGRAM_TOKEN or not GEMINI_API_KEYS:
-    raise SystemExit("Missing TELEGRAM_BOT_TOKEN or GEMINI_API_KEY(s)")
+if not TELEGRAM_TOKEN or (not GEMINI_API_KEYS and not GROK_API_KEY):
+    raise SystemExit("Missing TELEGRAM_BOT_TOKEN or API Key(s)")
 
 # PRESERVED: Your specific version choice
 DEFAULT_MODEL = "gemini-2.0-flash"
@@ -948,6 +951,8 @@ async def translate_text(text: str, user_id: int):
     version_fallback = [DEFAULT_MODEL, "gemini-2.0-flash-exp", "gemini-2.5-flash", "gemini-1.5-flash"]
     
     api_error = None
+    
+    # 1. Try Gemini first
     for model_ver in version_fallback:
         for i, key in enumerate(GEMINI_API_KEYS):
             try:
@@ -968,12 +973,39 @@ async def translate_text(text: str, user_id: int):
                         logger.info(f"Cached translation for: {text[:50]}...")
                     
                     return translation
-                return "⚠️ Safety filter blocked this response."
+                api_error = "Safety filter blocked response"
             except Exception as e:
                 api_error = str(e)
-                logger.warning(f"API error with {model_ver}, key {i}: {e}")
+                logger.warning(f"Gemini error with {model_ver}, key {i}: {e}")
                 continue
     
+    # 2. Try Grok (xAI) as fallback if Gemini fails
+    if GROK_API_KEY:
+        try:
+            logger.info("Attempting Grok fallback...")
+            client = AsyncOpenAI(api_key=GROK_API_KEY, base_url="https://api.x.ai/v1")
+            
+            response = await client.chat.completions.create(
+                model=GROK_MODEL,
+                messages=[
+                    {"role": "system", "content": get_system_prompt(dialect, history)},
+                    {"role": "user", "content": text}
+                ]
+            )
+            
+            if response.choices:
+                translation = response.choices[0].message.content
+                await db.add_history(user_id, text)
+                
+                # Cache the translation
+                if not user['context_mode'] or not history:
+                    await db.cache_translation(text, dialect, translation)
+                
+                return translation
+        except Exception as e:
+            api_error = f"Grok error: {str(e)}"
+            logger.error(api_error)
+
     # All APIs failed - try local dictionary fallback
     logger.error(f"All API attempts failed. Last error: {api_error}")
     logger.info(f"Attempting dictionary fallback for: {text[:50]}...")
@@ -1680,7 +1712,8 @@ async def health_check():
                 "queue_failed": queue_stats['failed'],
                 "cache_entries": cache_stats['total_entries'],
                 "cache_hits": cache_stats['total_hits'],
-                "api_keys_configured": len(GEMINI_API_KEYS)
+                "gemini_keys": len(GEMINI_API_KEYS),
+                "grok_active": GROK_API_KEY is not None
             }
         }
         
@@ -1777,7 +1810,8 @@ async def status_page():
                         <tr><td>Queue Worker</td><td>{'🟢 Running' if queue_stats['is_running'] else '🔴 Stopped'}</td></tr>
                         <tr><td>Database</td><td>{'🟢 Connected' if db._connection else '🔴 Disconnected'}</td></tr>
                         <tr><td>Bot</td><td>{'🟢 Active' if ptb_app.running else '🔴 Inactive'}</td></tr>
-                        <tr><td>API Keys</td><td>🟢 {len(GEMINI_API_KEYS)} configured</td></tr>
+                        <tr><td>Gemini Keys</td><td>🟢 {len(GEMINI_API_KEYS)} configured</td></tr>
+                        <tr><td>Grok API</td><td>{'🟢 Active' if GROK_API_KEY else '🔴 Not configured'}</td></tr>
                     </table>
                 </div>
                 
@@ -1830,9 +1864,13 @@ darja_bot_cache_entries_total {cache_stats['total_entries']}
 # TYPE darja_bot_cache_hits_total counter
 darja_bot_cache_hits_total {cache_stats['total_hits']}
 
-# HELP darja_bot_api_keys_available Number of configured API keys
-# TYPE darja_bot_api_keys_available gauge
-darja_bot_api_keys_available {len(GEMINI_API_KEYS)}
+# HELP darja_bot_gemini_keys Number of configured Gemini API keys
+# TYPE darja_bot_gemini_keys gauge
+darja_bot_gemini_keys {len(GEMINI_API_KEYS)}
+
+# HELP darja_bot_grok_active Grok API status (1=active, 0=inactive)
+# TYPE darja_bot_grok_active gauge
+darja_bot_grok_active {1 if GROK_API_KEY else 0}
 
 # HELP darja_bot_service_up Service health status (1=up, 0=down)
 # TYPE darja_bot_service_up gauge

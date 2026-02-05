@@ -29,7 +29,16 @@ def test_setup():
     if api_key and api_key != 'your_api_key_here':
         print(f"✅ GEMINI_API_KEY set ({len(api_key)} chars)")
     else:
-        print("⚠️  GEMINI_API_KEY not set (dictionary fallback will be used)")
+        print("⚠️  GEMINI_API_KEY not set")
+    
+    grok_key = os.getenv('GROK_API_KEY')
+    if grok_key and grok_key != 'your_grok_api_key_here':
+        print(f"✅ GROK_API_KEY set ({len(grok_key)} chars)")
+    else:
+        print("⚠️  GROK_API_KEY not set")
+    
+    if not api_key and not grok_key:
+        print("❌ No AI API keys configured! Dictionary fallback only.")
     
     # Check database path
     db_path = os.getenv('DATABASE_PATH', 'translations.db')
@@ -63,6 +72,13 @@ def test_setup():
         print("  ✅ aiosqlite")
     except ImportError as e:
         print(f"  ❌ aiosqlite: {e}")
+        return False
+    
+    try:
+        import openai
+        print("  ✅ openai (Grok)")
+    except ImportError as e:
+        print(f"  ❌ openai: {e}")
         return False
     
     print("\n✨ Setup looks good!")
