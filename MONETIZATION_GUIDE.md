@@ -11,7 +11,7 @@
 
 | Tier | Translations/Hour | Price | Duration |
 |------|------------------|-------|----------|
-| Free | 10 | $0 | Forever |
+| Free | 14 | $0 | Forever |
 | Basic | 50 | $4.99/mo | 30 days |
 | Pro | 200 | $9.99/mo | 30 days |
 | Unlimited | Unlimited | $19.99/mo | 30 days |
@@ -65,8 +65,8 @@ You'll need:
 - Send: `/whitelist add 123456789 @friendusername`
 
 **Test 4: Rate Limiting**
-- Ask friend to send 11 messages quickly
-- 11th should show upgrade buttons
+- Ask friend to send 15 messages quickly
+- 15th should show upgrade buttons
 
 ## Managing Users
 

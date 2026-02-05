@@ -119,7 +119,7 @@ class Database:
                 package_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 description TEXT,
-                translations_limit INTEGER DEFAULT 10,
+                translations_limit INTEGER DEFAULT 14,
                 window_minutes INTEGER DEFAULT 60,
                 price_usd REAL DEFAULT 0.0,
                 duration_days INTEGER DEFAULT 30,
@@ -147,11 +147,14 @@ class Database:
         await self._connection.execute('''
             INSERT OR IGNORE INTO packages (package_id, name, description, translations_limit, window_minutes, price_usd, duration_days)
             VALUES 
-                (1, 'Free', 'Basic free tier', 10, 60, 0.0, 36500),
+                (1, 'Free', 'Basic free tier', 14, 60, 0.0, 36500),
                 (2, 'Basic', '50 translations per hour', 50, 60, 4.99, 30),
                 (3, 'Pro', '200 translations per hour', 200, 60, 9.99, 30),
                 (4, 'Unlimited', 'Unlimited translations', 999999, 60, 19.99, 30)
         ''')
+        
+        # Ensure existing Free package is updated to 14
+        await self._connection.execute('UPDATE packages SET translations_limit = 14 WHERE package_id = 1 AND translations_limit = 10')
         
         await self._connection.commit()
     
@@ -389,7 +392,7 @@ class Database:
             return {'limit': 999999, 'window': 60, 'tier': 'admin', 'price': 0}
         
         # Default free tier
-        return {'limit': 10, 'window': 60, 'tier': 'free', 'price': 0}
+        return {'limit': 14, 'window': 60, 'tier': 'free', 'price': 0}
 
     async def add_admin(self, user_id, username=None, can_grant_access=False):
         """Add user to admin whitelist."""
