@@ -570,23 +570,40 @@ class TranslationQueue:
             keyboard = [[InlineKeyboardButton("⭐ Save", callback_data='save_fav')]]
             
             for i, chunk in enumerate(chunks):
-                if i == 0:
-                    # Edit the "Translating..." message
-                    await ptb_app.bot.edit_message_text(
-                        chat_id=task['chat_id'],
-                        message_id=task['message_id'],
-                        text=chunk,
-                        parse_mode='Markdown',
-                        reply_markup=InlineKeyboardMarkup(keyboard)
-                    )
-                else:
-                    # Send additional chunks as new messages
-                    await ptb_app.bot.send_message(
-                        chat_id=task['chat_id'],
-                        text=chunk,
-                        parse_mode='Markdown',
-                        reply_markup=InlineKeyboardMarkup(keyboard)
-                    )
+                try:
+                    if i == 0:
+                        # Edit the "Translating..." message
+                        await ptb_app.bot.edit_message_text(
+                            chat_id=task['chat_id'],
+                            message_id=task['message_id'],
+                            text=chunk,
+                            parse_mode='Markdown',
+                            reply_markup=InlineKeyboardMarkup(keyboard)
+                        )
+                    else:
+                        # Send additional chunks as new messages
+                        await ptb_app.bot.send_message(
+                            chat_id=task['chat_id'],
+                            text=chunk,
+                            parse_mode='Markdown',
+                            reply_markup=InlineKeyboardMarkup(keyboard)
+                        )
+                except Exception as parse_error:
+                    # If Markdown fails, retry with plain text
+                    logger.warning(f"Markdown parsing failed, retrying as plain text: {parse_error}")
+                    if i == 0:
+                        await ptb_app.bot.edit_message_text(
+                            chat_id=task['chat_id'],
+                            message_id=task['message_id'],
+                            text=chunk,
+                            reply_markup=InlineKeyboardMarkup(keyboard)
+                        )
+                    else:
+                        await ptb_app.bot.send_message(
+                            chat_id=task['chat_id'],
+                            text=chunk,
+                            reply_markup=InlineKeyboardMarkup(keyboard)
+                        )
         except Exception as e:
             logger.error(f"Error sending translation result: {e}")
     
@@ -906,6 +923,15 @@ DIALECT_PROMPTS = {
     'constantine': 'Algerian Arabic (Darja) from Constantine region'
 }
 
+import re
+
+# NEW: Utility to escape MarkdownV2 characters
+def escape_markdown(text):
+    """Escapes special characters for Telegram MarkdownV2."""
+    # Characters that need escaping in MarkdownV2: _ * [ ] ( ) ~ ` > # + - = | { } . !
+    # But since we use simple Markdown (parse_mode=Markdown), we only need to worry about unclosed symbols.
+    return text.replace('_', '\\_').replace('*', '\\*').replace('`', '\\`').replace('[', '\\[')
+
 # NEW: Utility to handle long messages
 def split_message(text, limit=4000):
     """Splits text into chunks to fit Telegram's 4096 character limit."""
@@ -1024,7 +1050,7 @@ async def translate_text(text: str, user_id: int):
     )
 
 async def translate_voice(file_path: str, user_id: int):
-    """Transcribe and translate audio file using Gemini."""
+    """Transcribe and translate audio file using Gemini with Groq Whisper fallback."""
     user = await db.get_user(user_id)
     dialect = user['dialect']
     
@@ -1032,23 +1058,21 @@ async def translate_voice(file_path: str, user_id: int):
     version_fallback = [DEFAULT_MODEL, "gemini-2.0-flash-exp", "gemini-2.5-flash", "gemini-1.5-flash"]
     
     api_error = None
+    # 1. Try Gemini first (Best for Darja because of multimodal support)
     for model_ver in version_fallback:
         for i, key in enumerate(GEMINI_API_KEYS):
             if not key: continue
             try:
                 genai.configure(api_key=key)
-                # Note: Voice processing works best with newer models
                 model = genai.GenerativeModel(model_name=model_ver)
                 
-                # Upload file to Gemini
                 sample_file = genai.upload_file(path=file_path, display_name="Voice Message")
                 
                 prompt = get_system_prompt(dialect)
-                prompt += "\nThis is a voice message. Please transcribe the audio first accurately, then provide the full translation following the rules above."
+                prompt += "\nThis is a voice message. Please transcribe the audio accurately, then provide the full translation."
                 
                 response = model.generate_content([prompt, sample_file])
                 
-                # Clean up uploaded file from Gemini storage
                 try:
                     genai.delete_file(sample_file.name)
                 except:
@@ -1059,8 +1083,32 @@ async def translate_voice(file_path: str, user_id: int):
                     
             except Exception as e:
                 api_error = str(e)
-                logger.error(f"Voice API Error (Key {i}, Model {model_ver}): {e}")
+                logger.error(f"Voice Gemini Error (Key {i}): {e}")
                 continue
+
+    # 2. Try Groq Whisper Fallback
+    if GROQ_API_KEY:
+        try:
+            logger.info("Attempting Groq Whisper fallback...")
+            client = AsyncGroq(api_key=GROQ_API_KEY)
+            
+            # Groq Whisper requires the file to be opened in binary mode
+            with open(file_path, "rb") as audio_file:
+                transcription = await client.audio.transcriptions.create(
+                    file=(os.path.basename(file_path), audio_file.read()),
+                    model="whisper-large-v3",
+                    response_format="text"
+                )
+            
+            if transcription:
+                logger.info(f"Whisper transcription success: {transcription[:50]}...")
+                # Now translate the transcribed text using Groq
+                return await translate_text(transcription, user_id)
+        except Exception as e:
+            api_error = f"Whisper error: {str(e)}"
+            logger.error(api_error)
+
+    return f"❌ Voice Translation Failed\n\nError: `{api_error}`"
                 
     return f"❌ Voice translation failed.\n\nError: {api_error or 'Unknown error'}"
 
