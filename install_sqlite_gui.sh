@@ -1,0 +1,42 @@
+#!/bin/bash
+
+echo "📊 Installing SQLite GUI Tools"
+echo "==============================="
+echo ""
+
+echo "Option 1: DB Browser for SQLite (RECOMMENDED)"
+echo "----------------------------------------------"
+echo "Installation:"
+echo "  sudo apt update"
+echo "  sudo apt install sqlitebrowser"
+echo ""
+echo "Usage:"
+echo "  sqlitebrowser ./test_translations.db"
+echo ""
+
+echo "Option 2: SQLiteStudio"
+echo "----------------------"
+echo "Download from: https://sqlitestudio.pl/"
+echo "  - Download AppImage or install via snap"
+echo "  - Or: sudo snap install sqlitestudio"
+echo ""
+
+echo "Option 3: VS Code Extension"
+echo "---------------------------"
+echo "1. Open VS Code"
+echo "2. Extensions (Ctrl+Shift+X)"
+echo "3. Search: 'SQLite' by alexcvzz"
+echo "4. Install and open test_translations.db"
+echo ""
+
+echo "Option 4: DBeaver (Universal Database Tool)"
+echo "-------------------------------------------"
+echo "Installation:"
+echo "  sudo snap install dbeaver-ce"
+echo ""
+echo "Or download from: https://dbeaver.io/download/"
+echo ""
+
+echo "==============================="
+echo "Your database: ./test_translations.db"
+echo "Location: $(pwd)/test_translations.db"
