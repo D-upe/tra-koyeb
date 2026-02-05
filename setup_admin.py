@@ -50,25 +50,21 @@ async def setup():
     
     if is_pg:
         conn = await psycopg.AsyncConnection.connect(DB_URL)
-    else:
-        conn = await aiosqlite.connect(DB_PATH)
-
-    async with conn:
-        # Add yourself as admin
-        if is_pg:
+        async with conn:
             await conn.execute(
                 "INSERT INTO admin_users (user_id, username, can_grant_access) VALUES (%s, %s, 1) "
                 "ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, can_grant_access = 1",
                 (user_id, username)
             )
-            # Grant yourself unlimited access
             await conn.execute(
                 "INSERT INTO user_subscriptions (user_id, package_id, is_active, end_date) "
                 "VALUES (%s, 4, 1, CURRENT_TIMESTAMP + INTERVAL '100 years') "
                 "ON CONFLICT DO NOTHING",
                 (user_id,)
             )
-        else:
+            await conn.commit()
+    else:
+        async with aiosqlite.connect(DB_PATH) as conn:
             await conn.execute(
                 "INSERT OR REPLACE INTO admin_users (user_id, username, can_grant_access) VALUES (?, ?, 1)",
                 (user_id, username)
@@ -78,26 +74,26 @@ async def setup():
                 "VALUES (?, 4, 1, datetime('now', '+100 years'))",
                 (user_id,)
             )
-        
-        await conn.commit()
-        print("\n✅ Setup complete! You are now an admin.")
-        print()
-        print("You are now:")
-        print("  • Admin with full access")
-        print("  • Unlimited translations")
-        print("  • Can grant access to other users")
-        print()
-        print("Admin commands available:")
-        print("  /whitelist add <user_id> [@username]")
-        print("  /whitelist remove <user_id>")
-        print("  /grant <user_id> [package_id] [duration_days]")
-        print("  /revoke <user_id>")
-        print()
-        print("Packages:")
-        print("  1 = Free (14 translations/hour)")
-        print("  2 = Basic (50 translations/hour) - $4.99/mo")
-        print("  3 = Pro (200 translations/hour) - $9.99/mo")
-        print("  4 = Unlimited - $19.99/mo")
+            await conn.commit()
+    
+    print("\n✅ Setup complete! You are now an admin.")
+    print()
+    print("You are now:")
+    print("  • Admin with full access")
+    print("  • Unlimited translations")
+    print("  • Can grant access to other users")
+    print()
+    print("Admin commands available:")
+    print("  /whitelist add <user_id> [@username]")
+    print("  /whitelist remove <user_id>")
+    print("  /grant <user_id> [package_id] [duration_days]")
+    print("  /revoke <user_id>")
+    print()
+    print("Packages:")
+    print("  1 = Free (14 translations/hour)")
+    print("  2 = Basic (50 translations/hour) - $4.99/mo")
+    print("  3 = Pro (200 translations/hour) - $9.99/mo")
+    print("  4 = Unlimited - $19.99/mo")
 
 if __name__ == '__main__':
     try:
