@@ -6,3 +6,4 @@ python-dotenv
 asgiref
 uvicorn
 aiosqlite
+psycopg[binary]
