@@ -52,8 +52,8 @@ Send these messages to your test bot:
 - `/saved` - View bookmarks
 
 **Rate Limiting Test:**
-- Send 10 translations quickly
-- 11th should show rate limit message
+- Send 14 translations quickly
+- 15th should show rate limit message
 
 **Offline Dictionary Test:**
 - Disconnect internet temporarily
@@ -108,7 +108,7 @@ These won't affect production:
 
 ### 2. Test Non-Disruptive Features
 - **Caching**: Send "hello" twice - second should be cached
-- **Rate limiting**: Try 10+ messages (won't break anything)
+- **Rate limiting**: Try 14+ messages (won't break anything)
 - **Dictionary**: If APIs fail, dictionary kicks in
 
 ### 3. Monitor During Testing
@@ -143,8 +143,8 @@ curl https://your-bot.koyeb.app/health
 
 ### ✅ Rate Limiting
 ```
-1. Send 10 different messages quickly
-2. 11th message should show rate limit warning
+1. Send 14 different messages quickly
+2. 15th message should show rate limit warning
 3. Check remaining time in message
 ```
 
