@@ -31,18 +31,14 @@ def test_setup():
     else:
         print("⚠️  GEMINI_API_KEY not set")
     
-    grok_key = os.getenv('GROK_API_KEY')
-    if grok_key and grok_key != 'your_grok_api_key_here':
-        print(f"✅ GROK_API_KEY set ({len(grok_key)} chars)")
+    grok_key = os.getenv('GROQ_API_KEY')
+    if grok_key and grok_key != 'your_groq_api_key_here':
+        print(f"✅ GROQ_API_KEY set ({len(grok_key)} chars)")
     else:
-        print("⚠️  GROK_API_KEY not set")
+        print("⚠️  GROQ_API_KEY not set")
     
     if not api_key and not grok_key:
         print("❌ No AI API keys configured! Dictionary fallback only.")
-    
-    # Check database path
-    db_path = os.getenv('DATABASE_PATH', 'translations.db')
-    print(f"✅ Database path: {db_path}")
     
     # Test imports
     print("\n📦 Testing imports...")
@@ -52,6 +48,35 @@ def test_setup():
     except ImportError as e:
         print(f"  ❌ Flask: {e}")
         return False
+    
+    try:
+        import telegram
+        print("  ✅ python-telegram-bot")
+    except ImportError as e:
+        print(f"  ❌ python-telegram-bot: {e}")
+        return False
+    
+    try:
+        import google.generativeai
+        print("  ✅ google-generativeai")
+    except ImportError as e:
+        print(f"  ❌ google-generativeai: {e}")
+        return False
+    
+    try:
+        import aiosqlite
+        print("  ✅ aiosqlite")
+    except ImportError as e:
+        print(f"  ❌ aiosqlite: {e}")
+        return False
+    
+    try:
+        import groq
+        print("  ✅ groq")
+    except ImportError as e:
+        print(f"  ❌ groq: {e}")
+        return False
+
     
     try:
         import telegram

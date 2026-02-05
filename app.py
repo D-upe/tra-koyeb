@@ -18,7 +18,7 @@ from telegram.ext import (
     filters, ContextTypes
 )
 import google.generativeai as genai
-from openai import AsyncOpenAI
+from groq import AsyncGroq
 
 # ===== Load env & logging =====
 load_dotenv()
@@ -499,14 +499,14 @@ startup_time = datetime.now()
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 raw_keys = [os.getenv(f'GEMINI_API_KEY{suffix}') for suffix in ['', '_2', '_3']]
 GEMINI_API_KEYS = [k for k in raw_keys if k]
-GROK_API_KEY = os.getenv('GROK_API_KEY')
-GROK_MODEL = os.getenv('GROK_MODEL', 'grok-2-latest')
+GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 
-if not TELEGRAM_TOKEN or (not GEMINI_API_KEYS and not GROK_API_KEY):
+if not TELEGRAM_TOKEN or (not GEMINI_API_KEYS and not GROQ_API_KEY):
     raise SystemExit("Missing TELEGRAM_BOT_TOKEN or API Key(s)")
 
 # PRESERVED: Your specific version choice
 DEFAULT_MODEL = "gemini-2.0-flash"
+GROQ_MODEL = os.getenv('GROQ_MODEL', 'llama-3.3-70b-versatile')
 BASE_URL = os.getenv('KOYEB_PUBLIC_URL', '').rstrip('/')
 
 # ===== Async Queue for Heavy Operations =====
@@ -979,14 +979,14 @@ async def translate_text(text: str, user_id: int):
                 logger.warning(f"Gemini error with {model_ver}, key {i}: {e}")
                 continue
     
-    # 2. Try Grok (xAI) as fallback if Gemini fails
-    if GROK_API_KEY:
+    # 2. Try Groq as fallback if Gemini fails
+    if GROQ_API_KEY:
         try:
-            logger.info("Attempting Grok fallback...")
-            client = AsyncOpenAI(api_key=GROK_API_KEY, base_url="https://api.x.ai/v1")
+            logger.info("Attempting Groq fallback...")
+            client = AsyncGroq(api_key=GROQ_API_KEY)
             
             response = await client.chat.completions.create(
-                model=GROK_MODEL,
+                model=GROQ_MODEL,
                 messages=[
                     {"role": "system", "content": get_system_prompt(dialect, history)},
                     {"role": "user", "content": text}
@@ -1003,7 +1003,7 @@ async def translate_text(text: str, user_id: int):
                 
                 return translation
         except Exception as e:
-            api_error = f"Grok error: {str(e)}"
+            api_error = f"Groq error: {str(e)}"
             logger.error(api_error)
 
     # All APIs failed - try local dictionary fallback
@@ -1713,7 +1713,7 @@ async def health_check():
                 "cache_entries": cache_stats['total_entries'],
                 "cache_hits": cache_stats['total_hits'],
                 "gemini_keys": len(GEMINI_API_KEYS),
-                "grok_active": GROK_API_KEY is not None
+                "groq_active": GROQ_API_KEY is not None
             }
         }
         
@@ -1811,7 +1811,7 @@ async def status_page():
                         <tr><td>Database</td><td>{'🟢 Connected' if db._connection else '🔴 Disconnected'}</td></tr>
                         <tr><td>Bot</td><td>{'🟢 Active' if ptb_app.running else '🔴 Inactive'}</td></tr>
                         <tr><td>Gemini Keys</td><td>🟢 {len(GEMINI_API_KEYS)} configured</td></tr>
-                        <tr><td>Grok API</td><td>{'🟢 Active' if GROK_API_KEY else '🔴 Not configured'}</td></tr>
+                        <tr><td>Groq API</td><td>{'🟢 Active' if GROQ_API_KEY else '🔴 Not configured'}</td></tr>
                     </table>
                 </div>
                 
@@ -1868,9 +1868,9 @@ darja_bot_cache_hits_total {cache_stats['total_hits']}
 # TYPE darja_bot_gemini_keys gauge
 darja_bot_gemini_keys {len(GEMINI_API_KEYS)}
 
-# HELP darja_bot_grok_active Grok API status (1=active, 0=inactive)
-# TYPE darja_bot_grok_active gauge
-darja_bot_grok_active {1 if GROK_API_KEY else 0}
+# HELP darja_bot_groq_active Groq API status (1=active, 0=inactive)
+# TYPE darja_bot_groq_active gauge
+darja_bot_groq_active {1 if GROQ_API_KEY else 0}
 
 # HELP darja_bot_service_up Service health status (1=up, 0=down)
 # TYPE darja_bot_service_up gauge
