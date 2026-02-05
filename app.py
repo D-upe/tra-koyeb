@@ -503,7 +503,7 @@ if not TELEGRAM_TOKEN or not GEMINI_API_KEYS:
     raise SystemExit("Missing TELEGRAM_BOT_TOKEN or GEMINI_API_KEY(s)")
 
 # PRESERVED: Your specific version choice
-DEFAULT_MODEL = "gemini-1.5-flash"
+DEFAULT_MODEL = "gemini-2.0-flash"
 BASE_URL = os.getenv('KOYEB_PUBLIC_URL', '').rstrip('/')
 
 # ===== Async Queue for Heavy Operations =====
@@ -945,7 +945,7 @@ async def translate_text(text: str, user_id: int):
             return f"⚡ *Cached*\n\n{cached}"
     
     # PRESERVED: Original version fallback list
-    version_fallback = [DEFAULT_MODEL, "gemini-1.5-pro", "gemini-2.0-flash-exp"]
+    version_fallback = [DEFAULT_MODEL, "gemini-2.0-flash-exp", "gemini-2.5-flash", "gemini-1.5-flash"]
     
     api_error = None
     for model_ver in version_fallback:
@@ -997,7 +997,7 @@ async def translate_voice(file_path: str, user_id: int):
     dialect = user['dialect']
     
     # PRESERVED: Original version fallback list
-    version_fallback = [DEFAULT_MODEL, "gemini-1.5-pro", "gemini-2.0-flash-exp"]
+    version_fallback = [DEFAULT_MODEL, "gemini-2.0-flash-exp", "gemini-2.5-flash", "gemini-1.5-flash"]
     
     api_error = None
     for model_ver in version_fallback:
