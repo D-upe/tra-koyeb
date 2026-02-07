@@ -100,7 +100,7 @@ class Database:
 
     async def _create_tables(self):
         # Shared types/syntax adjustments
-        serial_type = "SERIAL" if self.is_pg else "INTEGER PRIMARY KEY AUTOINCREMENT"
+        serial_type = "SERIAL PRIMARY KEY" if self.is_pg else "INTEGER PRIMARY KEY AUTOINCREMENT"
         
         # 1. Users table
         await self.execute('''

@@ -50,6 +50,11 @@ async def setup():
     
     if is_pg:
         async with await psycopg.AsyncConnection.connect(DB_URL) as conn:
+            # First ensure the user exists in the users table
+            await conn.execute(
+                "INSERT INTO users (user_id) VALUES (%s) ON CONFLICT (user_id) DO NOTHING",
+                (user_id,)
+            )
             await conn.execute(
                 "INSERT INTO admin_users (user_id, username, can_grant_access) VALUES (%s, %s, 1) "
                 "ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username, can_grant_access = 1",
