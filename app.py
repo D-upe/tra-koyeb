@@ -284,11 +284,25 @@ class Database:
     async def get_cache_stats(self):
         try:
             cursor = await self.execute('SELECT COUNT(*) FROM cache')
-            total = (await cursor.fetchone())[0]
+            row = await cursor.fetchone()
+            total = row[0] if row else 0
+            
             cursor = await self.execute('SELECT SUM(hit_count) FROM cache')
-            hits = (await cursor.fetchone())[0]
-            return {'total_entries': total or 0, 'total_hits': hits or 0}
-        except: return {'total_entries': 0, 'total_hits': 0}
+            row = await cursor.fetchone()
+            hits = row[0] if row and row[0] is not None else 0
+            
+            cursor = await self.execute('SELECT COUNT(*) FROM cache WHERE hit_count > 0')
+            row = await cursor.fetchone()
+            used = row[0] if row else 0
+            
+            return {
+                'total_entries': total, 
+                'total_hits': hits,
+                'used_entries': used
+            }
+        except Exception as e:
+            logger.error(f"Error getting cache stats: {e}")
+            return {'total_entries': 0, 'total_hits': 0, 'used_entries': 0}
 
     async def check_rate_limit(self, user_id, max_requests=10, window_minutes=60):
         cursor = await self.execute('SELECT request_count, window_start FROM rate_limits WHERE user_id = ?', (user_id,))
@@ -991,8 +1005,11 @@ async def translate_voice(file_path: str, user_id: int):
 
 async def check_admin(update: Update) -> bool:
     """Check if user is an admin."""
+    if not update.effective_user:
+        return False
     user_id = update.effective_user.id
-    return await db.is_user_allowed(user_id)
+    is_allowed, access_type = await db.is_user_allowed(user_id)
+    return access_type == "admin"
 
 async def packages_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show available packages for purchase."""
