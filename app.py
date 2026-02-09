@@ -406,7 +406,7 @@ startup_time = datetime.now()
 
 # ===== Environment & API keys =====
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-raw_keys = [os.getenv(f'GEMINI_API_KEY{suffix}') for suffix in ['', '_2', '_3']]
+raw_keys = [os.getenv(f'GEMINI_API_KEY{suffix}') for suffix in ['', '_1', '_2', '_3']]
 GEMINI_API_KEYS = [k for k in raw_keys if k]
 GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 
@@ -1002,7 +1002,7 @@ async def translate_voice(file_path: str, user_id: int):
             try:
                 client = genai.Client(api_key=key)
                 
-                sample_file = client.files.upload(path=file_path, config={'display_name': "Voice Message"})
+                sample_file = client.files.upload(file=file_path, config={'display_name': "Voice Message"})
                 
                 prompt = get_system_prompt(dialect)
                 prompt += "\nThis is a voice message. Please transcribe the audio accurately, then provide the full translation."
