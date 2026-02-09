@@ -25,6 +25,19 @@ from telegram.ext import (
 )
 from google import genai
 from groq import AsyncGroq
+import edge_tts
+
+# ===== TTS Configuration =====
+TTS_VOICES = {
+    'standard': 'ar-DZ-IsmaelNeural', # Algerian Arabic (Male)
+    'algiers': 'ar-DZ-IsmaelNeural',
+    'oran': 'ar-DZ-IsmaelNeural',
+    'tunis': 'ar-TN-HediNeural',      # Tunisian (Male)
+    'morocco': 'ar-MA-JamalNeural',   # Moroccan (Male)
+    'egypt': 'ar-EG-SalmaNeural',     # Egyptian (Female)
+    'saudi': 'ar-SA-HamedNeural',     # Saudi (Male)
+    'fallback': 'ar-SA-ZariyahNeural' # Standard Arabic (Female)
+}
 
 # ===== Load env & logging =====
 load_dotenv()
@@ -500,6 +513,32 @@ class TranslationQueue:
                             text=chunk,
                             reply_markup=InlineKeyboardMarkup(keyboard)
                         )
+            
+            # Generate and send TTS audio if successful translation
+            if not result_text.startswith("❌"):
+                try:
+                    # Fetch user dialect
+                    user = await db.get_user(task['user_id'])
+                    dialect = user['dialect']
+                    
+                    # Generate audio
+                    audio_path = await generate_tts_audio(result_text, dialect)
+                    
+                    if audio_path:
+                        # Send voice note
+                        with open(audio_path, 'rb') as audio:
+                            await ptb_app.bot.send_voice(
+                                chat_id=task['chat_id'],
+                                voice=audio,
+                                caption="🗣️ Audio Pronunciation",
+                                reply_to_message_id=task['message_id']
+                            )
+                        
+                        # Cleanup
+                        os.remove(audio_path)
+                except Exception as tts_error:
+                    logger.error(f"TTS Send Error: {tts_error}")
+                    
         except Exception as e:
             logger.error(f"Error sending translation result: {e}")
     
@@ -1009,6 +1048,29 @@ async def translate_voice(file_path: str, user_id: int):
             logger.error(api_error)
 
     return f"❌ Voice Translation Failed\n\nError: `{api_error}`"
+
+async def generate_tts_audio(text: str, dialect: str) -> str:
+    """Generate TTS audio file for the given text and dialect."""
+    try:
+        # Determine voice - remove emojis/markdown if present
+        clean_text = text.replace('*', '').replace('_', '')
+        
+        # Select voice based on dialect
+        voice = TTS_VOICES.get(dialect, TTS_VOICES['fallback'])
+        
+        # Create temp file path
+        temp_dir = tempfile.gettempdir()
+        output_path = os.path.join(temp_dir, f"tts_{datetime.now().timestamp()}.mp3")
+        
+        # Generate audio using edge-tts
+        communicate = edge_tts.Communicate(clean_text, voice)
+        await communicate.save(output_path)
+        
+        logger.info(f"Generated TTS audio: {output_path} (Voice: {voice})")
+        return output_path
+    except Exception as e:
+        logger.error(f"TTS Error: {e}")
+        return None
 
 # ===== Handlers =====
 
