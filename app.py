@@ -23,7 +23,7 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler, 
     filters, ContextTypes
 )
-import google.generativeai as genai
+from google import genai
 from groq import AsyncGroq
 
 # ===== Load env & logging =====
@@ -871,14 +871,16 @@ async def translate_text(text: str, user_id: int):
     for model_ver in version_fallback:
         for i, key in enumerate(GEMINI_API_KEYS):
             try:
-                genai.configure(api_key=key)
-                model = genai.GenerativeModel(
-                    model_name=model_ver,
-                    system_instruction=get_system_prompt(dialect, history)
+                client = genai.Client(api_key=key)
+                response = client.models.generate_content(
+                    model=model_ver,
+                    contents=text,
+                    config={
+                        'system_instruction': get_system_prompt(dialect, history)
+                    }
                 )
-                response = model.generate_content(text)
                 
-                if response.candidates:
+                if response.text:
                     translation = response.text
                     await db.add_history(user_id, text)
                     
@@ -952,18 +954,20 @@ async def translate_voice(file_path: str, user_id: int):
         for i, key in enumerate(GEMINI_API_KEYS):
             if not key: continue
             try:
-                genai.configure(api_key=key)
-                model = genai.GenerativeModel(model_name=model_ver)
+                client = genai.Client(api_key=key)
                 
-                sample_file = genai.upload_file(path=file_path, display_name="Voice Message")
+                sample_file = client.files.upload(path=file_path, config={'display_name': "Voice Message"})
                 
                 prompt = get_system_prompt(dialect)
                 prompt += "\nThis is a voice message. Please transcribe the audio accurately, then provide the full translation."
                 
-                response = model.generate_content([prompt, sample_file])
+                response = client.models.generate_content(
+                    model=model_ver,
+                    contents=[prompt, sample_file]
+                )
                 
                 try:
-                    genai.delete_file(sample_file.name)
+                    client.files.delete(name=sample_file.name)
                 except:
                     pass
                 
@@ -971,8 +975,8 @@ async def translate_voice(file_path: str, user_id: int):
                     return response.text.strip()
                     
             except Exception as e:
-                api_error = str(e)
                 logger.error(f"Voice Gemini Error (Key {i}): {e}")
+                api_error = str(e)
                 continue
 
     # 2. Try Groq Whisper Fallback
@@ -998,8 +1002,6 @@ async def translate_voice(file_path: str, user_id: int):
             logger.error(api_error)
 
     return f"❌ Voice Translation Failed\n\nError: `{api_error}`"
-                
-    return f"❌ Voice translation failed.\n\nError: {api_error or 'Unknown error'}"
 
 # ===== Handlers =====
 

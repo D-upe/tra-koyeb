@@ -1,6 +1,6 @@
 flask
-python-telegram-bot[webhooks]==20.7
-google-generativeai
+python-telegram-bot[webhooks]>=21.0
+google-genai
 groq
 python-dotenv
 asgiref
