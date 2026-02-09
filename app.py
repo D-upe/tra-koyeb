@@ -50,6 +50,13 @@ class Database:
     
     async def connect(self):
         if self.db_url:
+            # Fix for common copy-paste error where "psql " is included in the URL
+            if self.db_url.startswith("psql "):
+                self.db_url = self.db_url.replace("psql ", "", 1).strip()
+            
+            # Remove potential wrapping quotes from the URL
+            self.db_url = self.db_url.strip("'").strip('"')
+            
             try:
                 # PostgreSQL (psycopg 3)
                 self._connection = await psycopg.AsyncConnection.connect(self.db_url, autocommit=True)
