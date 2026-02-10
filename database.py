@@ -193,6 +193,33 @@ class Database:
                 FOREIGN KEY (package_id) REFERENCES packages(package_id) ON DELETE CASCADE
             )
         ''')
+
+        # 9. Feedback table
+        await self.execute(f'''
+            CREATE TABLE IF NOT EXISTS feedback (
+                id {serial_type},
+                user_id BIGINT,
+                original_text TEXT,
+                generated_translation TEXT,
+                suggested_translation TEXT,
+                dialect TEXT,
+                feedback_type TEXT DEFAULT 'incorrect',
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        # 10. Verified Translations table
+        await self.execute(f'''
+            CREATE TABLE IF NOT EXISTS verified_translations (
+                id {serial_type},
+                text TEXT,
+                dialect TEXT DEFAULT 'standard',
+                translation TEXT NOT NULL,
+                approved_by BIGINT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
         
         # Insert default packages
         packages_data = [
@@ -369,6 +396,48 @@ class Database:
         row = await cursor.fetchone()
         if row: return {'tier': row[0], 'limit': row[1], 'expires': row[2], 'used': row[3], 'price': row[4]}
         return None
+
+    # Feedback and Verification Methods
+    async def add_feedback(self, user_id, original_text, generated_translation, suggested_translation, dialect, feedback_type='incorrect'):
+        try:
+            await self.execute(
+                'INSERT INTO feedback (user_id, original_text, generated_translation, suggested_translation, dialect, feedback_type) VALUES (?, ?, ?, ?, ?, ?)',
+                (user_id, original_text, generated_translation, suggested_translation, dialect, feedback_type)
+            )
+            await self.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Error adding feedback: {e}")
+            return False
+
+    async def get_verified_translation(self, text, dialect='standard'):
+        """Check for a human-verified translation."""
+        normalized_text = text.lower().strip().rstrip('?').rstrip('!').rstrip('.')
+        cursor = await self.execute('SELECT translation FROM verified_translations WHERE text = ? AND dialect = ?', (normalized_text, dialect))
+        row = await cursor.fetchone()
+        if row:
+            # Also update cache hit count if we wanted to track it, but for now just return
+            return row[0]
+        return None
+
+    async def add_verified_translation(self, text, translation, dialect='standard', approved_by=None):
+        try:
+            normalized_text = text.lower().strip().rstrip('?').rstrip('!').rstrip('.')
+            if self.is_pg:
+                await self.execute(
+                    'INSERT INTO verified_translations (text, dialect, translation, approved_by) VALUES (?, ?, ?, ?) ON CONFLICT (text, dialect) DO UPDATE SET translation = EXCLUDED.translation',
+                    (normalized_text, dialect, translation, approved_by)
+                )
+            else:
+                await self.execute(
+                    'INSERT OR REPLACE INTO verified_translations (text, dialect, translation, approved_by) VALUES (?, ?, ?, ?)',
+                    (normalized_text, dialect, translation, approved_by)
+                )
+            await self.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Error adding verified translation: {e}")
+            return False
 
 # Global DB instance
 db = Database()

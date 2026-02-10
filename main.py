@@ -18,7 +18,7 @@ from handlers import (
     dictionary_command, stats_command, queue_command, set_dialect,
     dialect_callback, save_callback, handle_voice, handle_message,
     packages_command, subscription_command, grant_command, revoke_command, whitelist_command,
-    upgrade_callback
+    upgrade_callback, report_callback, review_command, review_callback, cancel_feedback
 )
 
 # Logging setup
@@ -195,10 +195,14 @@ def main():
     ptb_app.add_handler(CommandHandler("grant", grant_command))
     ptb_app.add_handler(CommandHandler("revoke", revoke_command))
     ptb_app.add_handler(CommandHandler("whitelist", whitelist_command))
+    ptb_app.add_handler(CommandHandler("review", review_command))
+    ptb_app.add_handler(CommandHandler("cancel", cancel_feedback))
     
     ptb_app.add_handler(CallbackQueryHandler(dialect_callback, pattern="^dial_"))
     ptb_app.add_handler(CallbackQueryHandler(save_callback, pattern="^save_fav$"))
+    ptb_app.add_handler(CallbackQueryHandler(report_callback, pattern="^report_issue$"))
     ptb_app.add_handler(CallbackQueryHandler(upgrade_callback, pattern="^upgrade_"))
+    ptb_app.add_handler(CallbackQueryHandler(review_callback, pattern="^rev_"))
     
     ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     

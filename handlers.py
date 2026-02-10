@@ -1,5 +1,6 @@
 import os
 import logging
+import re
 import tempfile
 import subprocess
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, constants
@@ -450,6 +451,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
     
+    # Check for feedback state
+    if context.user_data.get('feedback_state') == 'waiting_for_correction':
+        await handle_feedback(update, context)
+        return
+    
     user_id = update.effective_user.id
     
     # Check if user is allowed (whitelist check)
@@ -591,3 +597,177 @@ async def upgrade_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
+async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle feedback/report button clicks."""
+    query = update.callback_query
+    await query.answer()
+    
+    # Store original message content in user_data
+    message_text = query.message.text
+    
+    # Clean emojis for easier parsing
+    clean_text = message_text.replace('*', '')
+    
+    # Try to extract original text using regex if formatted
+    # Expected format: "🔤 Original: [text]"
+    # Note: Using simple string finding as regex might be fragile with newlines
+    
+    original_text = "Unknown"
+    generated_translation = message_text
+    
+    try:
+        if "Original:" in clean_text:
+            parts = clean_text.split("Original:")
+            if len(parts) > 1:
+                # Take everything until the next section (Darja:)
+                original_part = parts[1].split("Darja:")[0]
+                original_text = original_part.strip()
+        
+        if "Darja:" in clean_text:
+             parts = clean_text.split("Darja:")
+             if len(parts) > 1:
+                 # Take everything until the next section
+                 trans_part = parts[1].split("Pronunciation:")[0]
+                 generated_translation = trans_part.strip()
+    except Exception as e:
+        logging.error(f"Error parsing message for feedback: {e}")
+
+    # Set state
+    context.user_data['feedback_state'] = 'waiting_for_correction'
+    context.user_data['feedback_original'] = original_text
+    context.user_data['feedback_translation'] = generated_translation
+    
+    await query.message.reply_text(
+        f"📝 **Help Improve Our Translations**\n\n"
+        f"You reported an issue with the translation for:\n`{original_text}`\n\n"
+        f"Please reply with the correct Darja translation or describe the issue.\n\n"
+        f"Type /cancel to cancel this feedback.",
+        parse_mode='Markdown'
+    )
+
+async def cancel_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancel feedback state."""
+    if context.user_data.get('feedback_state') == 'waiting_for_correction':
+        del context.user_data['feedback_state']
+        context.user_data.pop('feedback_original', None)
+        context.user_data.pop('feedback_translation', None)
+        await update.message.reply_text("❌ Feedback cancelled.")
+    else:
+        await update.message.reply_text("You are not submitting feedback.")
+async def handle_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process user feedback."""
+    user_id = update.effective_user.id
+    feedback_text = update.message.text
+    
+    original_text = context.user_data.get('feedback_original', 'Unknown')
+    generated_translation = context.user_data.get('feedback_translation', 'Unknown')
+    
+    # Get user dialect context
+    user = await db.get_user(user_id)
+    dialect = user.get('dialect', 'standard')
+    
+    # Save feedback to DB
+    success = await db.add_feedback(
+        user_id=user_id,
+        original_text=original_text,
+        generated_translation=generated_translation,
+        suggested_translation=feedback_text,
+        dialect=dialect
+    )
+    
+    # Clear state
+    if 'feedback_state' in context.user_data:
+        del context.user_data['feedback_state']
+        # Clean up other keys
+        context.user_data.pop('feedback_original', None)
+        context.user_data.pop('feedback_translation', None)
+    
+    if success:
+        await update.message.reply_text("✅ **Thank you!** Your feedback has been submitted for review.", parse_mode='Markdown')
+    else:
+        await update.message.reply_text("❌ There was an error saving your feedback. Please try again later.")
+
+async def review_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin: Review pending feedback."""
+    # Check admin
+    if not await check_admin(update):
+        if update.message:
+            return await update.message.reply_text("⛔ Admin only.")
+        return
+
+    # Get one pending feedback item
+    cursor = await db.execute("SELECT id, original_text, generated_translation, suggested_translation, dialect FROM feedback WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1")
+    row = await cursor.fetchone()
+    
+    # Determine reply function
+    if update.message:
+        reply = update.message.reply_text
+    elif update.callback_query and update.callback_query.message:
+        reply = update.callback_query.message.reply_text
+    else:
+        return
+
+    if not row:
+        return await reply("✅ No pending feedback to review!")
+    
+    fid, orig, gen, sugg, dialect = row
+    
+    text = (
+        f"🕵️ **Review Feedback (#{fid})**\n\n"
+        f"🔤 **Original:** {orig}\n"
+        f"🤖 **Generated:** {gen}\n"
+        f"👤 **User Suggestion:** {sugg}\n"
+        f"🌍 **Dialect:** {dialect}\n"
+    )
+    
+    keyboard = [
+        [
+            InlineKeyboardButton("✅ Approve", callback_data=f"rev_approve_{fid}"),
+            InlineKeyboardButton("❌ Reject", callback_data=f"rev_reject_{fid}")
+        ],
+        [InlineKeyboardButton("⏭️ Skip", callback_data="rev_skip")]
+    ]
+    
+    await reply(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def review_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle review actions."""
+    query = update.callback_query
+    action = query.data
+    
+    if action == "rev_skip":
+        await query.message.delete()
+        await review_command(update, context) 
+        return
+
+    try:
+        parts = action.split('_')
+        # Format: rev_approve_123 or rev_reject_123
+        decision = parts[1]
+        fid = int(parts[2])
+        
+        if decision == "approve":
+            cursor = await db.execute("SELECT original_text, suggested_translation, dialect FROM feedback WHERE id = ?", (fid,))
+            row = await cursor.fetchone()
+            if row:
+                orig, sugg, dial = row
+                await db.add_verified_translation(orig, sugg, dial, approved_by=update.effective_user.id)
+                # Update status
+                await db.execute("UPDATE feedback SET status = 'approved' WHERE id = ?", (fid,))
+                await db.commit()
+                await query.answer("✅ Approved & Verified!")
+            else:
+                 await query.answer("❌ Feedback not found")
+        
+        elif decision == "reject":
+            await db.execute("UPDATE feedback SET status = 'rejected' WHERE id = ?", (fid,))
+            await db.commit()
+            await query.answer("❌ Rejected")
+            
+        await query.message.delete()
+        await review_command(update, context)
+        
+    except Exception as e:
+        logging.error(f"Review error: {e}")
+        await query.answer("Error processing request")

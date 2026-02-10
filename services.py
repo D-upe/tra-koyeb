@@ -310,6 +310,17 @@ async def translate_text(text: str, user_id: int):
     history = await db.get_history(user_id) if user['context_mode'] else None
     dialect = user['dialect']
     
+    # 0. Check Verified Translations first (Highest Priority)
+    try:
+        verified = await db.get_verified_translation(text, dialect)
+        if verified:
+            logger.info(f"Verified translation hit for: {text[:50]}...")
+            await db.add_history(user_id, text)
+            return f"✅ *Verified Translation*\n\n{verified}"
+    except Exception as e:
+        logger.error(f"Error checking verified translations: {e}")
+        # Continue to API fallback
+    
     # Check cache first (only for dialect-specific translations without context)
     if not user['context_mode'] or not history:
         cached = await db.get_cached_translation(text, dialect)
@@ -448,10 +459,10 @@ async def translate_voice(file_path: str, user_id: int):
                     response_format="text"
                 )
             
-            if transcription:
-                logger.info(f"Whisper transcription success: {transcription[:50]}...")
+            if transcription.text:
+                logger.info(f"Whisper transcription success: {transcription.text[:50]}...")
                 # Now translate the transcribed text using Groq
-                return await translate_text(transcription, user_id)
+                return await translate_text(transcription.text, user_id)
         except Exception as e:
             api_error = f"Whisper error: {str(e)}"
             logger.error(api_error)
@@ -529,7 +540,14 @@ class TranslationQueue:
         """Send translation result back to the chat."""
         try:
             chunks = split_message(result_text)
-            keyboard = [[InlineKeyboardButton("⭐ Save", callback_data='save_fav')]]
+            
+            # Create keyboard with Save and Report buttons
+            keyboard = [
+                [
+                    InlineKeyboardButton("⭐ Save", callback_data='save_fav'),
+                    InlineKeyboardButton("👎 Report/Correct", callback_data='report_issue')
+                ]
+            ]
             
             for i, chunk in enumerate(chunks):
                 try:
