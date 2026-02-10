@@ -20,7 +20,7 @@ class Database:
         self._connection = None
         self.is_pg = False
     
-    async def connect(self):
+    async def connect(self, init_tables=True):
         if self.db_url:
             # Fix for common copy-paste error where "psql " is included in the URL
             if self.db_url.startswith("psql "):
@@ -47,11 +47,15 @@ class Database:
         if not self.is_pg:
             await self._connection.execute('PRAGMA foreign_keys = ON')
         
-        await self._create_tables()
+        if init_tables:
+            await self._create_tables()
     
     async def close(self):
         if self._connection:
-            await self._connection.close()
+            try:
+                await self._connection.close()
+            except:
+                pass
     
     def _p(self, query):
         """Adapt placeholders to the current database engine."""
@@ -60,15 +64,29 @@ class Database:
         return query
 
     async def execute(self, query, params=None):
-        """Unified execute method for both SQLite and PostgreSQL."""
+        """Unified execute method for both SQLite and PostgreSQL with auto-reconnect."""
         query = self._p(query)
         try:
             if self.is_pg:
                 return await self._connection.execute(query, params)
             else:
-                # aiosqlite execute is a coroutine that returns a cursor
                 return await self._connection.execute(query, params)
         except Exception as e:
+            # Check for PostgreSQL disconnection errors
+            err_msg = str(e).lower()
+            if self.is_pg and ("closed" in err_msg or "consuming input failed" in err_msg or "connection is closed" in err_msg):
+                logger.warning(f"🔄 Database connection lost ({e}). Reconnecting...")
+                try:
+                    await self.close()
+                    # Reconnect without re-initializing tables (to avoid recursion loop)
+                    await self.connect(init_tables=False)
+                    # Retry the query once
+                    logger.info("🔄 Reconnected. Retrying query...")
+                    return await self._connection.execute(query, params)
+                except Exception as reconnect_error:
+                    logger.error(f"❌ Reconnect failed: {reconnect_error}")
+                    raise
+            
             logger.error(f"Database Error: {e} | Query: {query} | Params: {params}")
             raise
 
