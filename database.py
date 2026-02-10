@@ -306,8 +306,7 @@ class Database:
         cursor = await self.execute(f'SELECT s.subscription_id, p.name FROM user_subscriptions s JOIN packages p ON s.package_id = p.package_id WHERE s.user_id = ? AND s.is_active = 1 AND (s.end_date IS NULL OR {end_check})', (user_id,))
         row = await cursor.fetchone()
         if row: return True, row[1]
-        cursor = await self.execute('SELECT COUNT(*) FROM admin_users'); 
-        if (await cursor.fetchone())[0] > 0: return False, None
+        # Open access for everyone (default to free tier)
         return True, "free"
 
     async def get_user_limits(self, user_id):
