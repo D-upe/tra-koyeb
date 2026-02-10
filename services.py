@@ -406,6 +406,62 @@ async def translate_text(text: str, user_id: int):
         f"Error: `{api_error}`"
     )
 
+async def translate_image(file_path: str, user_id: int):
+    """Analyze and translate text from an image file using Gemini."""
+    user = await db.get_user(user_id)
+    dialect = user['dialect']
+    
+    # Use flash models which are faster/cheaper for vision
+    # gemini-2.0-flash-exp has excellent vision capabilities
+    version_fallback = ["gemini-2.0-flash-exp", "gemini-1.5-flash"]
+    
+    api_error = None
+    
+    for model_ver in version_fallback:
+        for i, key in enumerate(GEMINI_API_KEYS):
+            if not key: continue
+            try:
+                client = genai.Client(api_key=key)
+                
+                # Upload the image file
+                sample_file = client.files.upload(file=file_path, config={'display_name': "Image Translation"})
+                
+                # Create vision prompt
+                dialect_desc = DIALECT_PROMPTS.get(dialect, DIALECT_PROMPTS['standard'])
+                prompt = f"""
+                Analyze this image. 
+                1. If it contains text, translate it to {dialect_desc}.
+                2. If it's a scene without text, describe it briefly in {dialect_desc}.
+                
+                Provide output in this format:
+                🔤 **Detected:** [Original Text or Scene Description]
+                🇩🇿 **Darja:** [Arabic Script]
+                🗣️ **Pronunciation:** [Latin Script]
+                🇫🇷 **French:** [Translation]
+                🇬🇧 **English:** [Translation]
+                """
+                
+                response = client.models.generate_content(
+                    model=model_ver,
+                    contents=[prompt, sample_file]
+                )
+                
+                # Cleanup file
+                try:
+                    client.files.delete(name=sample_file.name)
+                except:
+                    pass
+                
+                if response and response.text:
+                    return response.text.strip()
+                    
+            except Exception as e:
+                logger.error(f"Image Gemini Error (Key {i}): {e}")
+                api_error = str(e)
+                continue
+
+    return f"❌ Image Translation Failed\n\nError: `{api_error}`"
+
 async def translate_voice(file_path: str, user_id: int):
     """Transcribe and translate audio file using Gemini with Groq Whisper fallback."""
     user = await db.get_user(user_id)

@@ -18,7 +18,11 @@ from handlers import (
     dictionary_command, stats_command, queue_command, set_dialect,
     dialect_callback, save_callback, handle_voice, handle_message,
     packages_command, subscription_command, grant_command, revoke_command, whitelist_command,
-    upgrade_callback, report_callback, review_command, review_callback, cancel_feedback
+    upgrade_callback, report_callback, review_command, review_callback, cancel_feedback,
+    handle_inline_query, broadcast_command
+)
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, InlineQueryHandler
 )
 
 # Logging setup
@@ -187,7 +191,7 @@ def main():
     ptb_app.add_handler(CommandHandler("stats", stats_command))
     ptb_app.add_handler(CommandHandler("queue", queue_command))
     
-    ptb_app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO | filters.VIDEO_NOTE, handle_voice))
+    # Combined media handler (Voice/Audio/Video/Photo) is registered below
     
     ptb_app.add_handler(CommandHandler("packages", packages_command))
     ptb_app.add_handler(CommandHandler("subscription", subscription_command))
@@ -197,6 +201,7 @@ def main():
     ptb_app.add_handler(CommandHandler("whitelist", whitelist_command))
     ptb_app.add_handler(CommandHandler("review", review_command))
     ptb_app.add_handler(CommandHandler("cancel", cancel_feedback))
+    ptb_app.add_handler(CommandHandler("broadcast", broadcast_command))
     
     ptb_app.add_handler(CallbackQueryHandler(dialect_callback, pattern="^dial_"))
     ptb_app.add_handler(CallbackQueryHandler(save_callback, pattern="^save_fav$"))
@@ -204,7 +209,12 @@ def main():
     ptb_app.add_handler(CallbackQueryHandler(upgrade_callback, pattern="^upgrade_"))
     ptb_app.add_handler(CallbackQueryHandler(review_callback, pattern="^rev_"))
     
+    ptb_app.add_handler(InlineQueryHandler(handle_inline_query))
+    
     ptb_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    # Handle Photo/Audio/Voice
+    ptb_app.add_handler(MessageHandler(filters.PHOTO | filters.VOICE | filters.AUDIO | filters.VIDEO_NOTE, handle_voice))
     
     # Setup ASGI for Uvicorn
     asgi_app = WsgiToAsgi(flask_app)

@@ -1,14 +1,18 @@
+import asyncio
 import os
 import logging
 import re
+import uuid
 import tempfile
 import subprocess
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, constants
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, constants, InlineQueryResultArticle, InputTextMessageContent
 from telegram.ext import ContextTypes
 
 from database import db
 from services import (
     translate_voice, 
+    translate_text,
+    translate_image,
     translation_queue, 
     dictionary_fallback, 
     DIALECT_PROMPTS
@@ -46,6 +50,48 @@ async def check_admin(update: Update) -> bool:
     user_id = update.effective_user.id
     is_allowed, access_type = await db.is_user_allowed(user_id)
     return access_type == "admin"
+
+async def handle_inline_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle inline queries."""
+    if not update.inline_query:
+        return
+
+    query = update.inline_query.query.strip()
+    user_id = update.effective_user.id
+
+    if not query:
+        return
+
+    try:
+        # Note: translate_text is async and might take 1-2s. 
+        # Inline queries should ideally be fast, but this is acceptable for a translation bot.
+        translation = await translate_text(query, user_id)
+        
+        # Create a simple description preview
+        # We strip markdown for the description
+        clean_translation = translation.replace('*', '').replace('`', '')
+        # Take first line or 50 chars
+        description = clean_translation.split('\n')[0][:50]
+        if len(clean_translation) > 50:
+            description += "..."
+
+        results = [
+            InlineQueryResultArticle(
+                id=str(uuid.uuid4()),
+                title="🇩🇿 Translate to Darja",
+                description=description,
+                input_message_content=InputTextMessageContent(
+                    message_text=translation,
+                    parse_mode='Markdown'
+                ),
+                thumbnail_url="https://upload.wikimedia.org/wikipedia/commons/thumb/7/77/Flag_of_Algeria.svg/320px-Flag_of_Algeria.svg.png"
+            )
+        ]
+
+        await update.inline_query.answer(results, cache_time=0)
+    except Exception as e:
+        logger.error(f"Inline query error: {e}")
+
 
 async def packages_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show available packages for purchase."""
@@ -359,14 +405,15 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
         
-    logger.info(f"Audio/Voice message received from {update.effective_user.id}")
+    logger.info(f"Audio/Voice/Photo message received from {update.effective_user.id}")
         
-    # Check if it's a voice note, an audio file, or a video note
+    # Check if it's a voice note, an audio file, a video note, or a photo
     voice = update.message.voice
     audio = update.message.audio
     video_note = update.message.video_note
+    photo = update.message.photo
     
-    if not (voice or audio or video_note):
+    if not (voice or audio or video_note or photo):
         return
         
     user_id = update.effective_user.id
@@ -393,6 +440,33 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⏱️ *Rate limit reached!*\n\nPlease try again in {reset_minutes} minute(s).", parse_mode='Markdown')
         return
 
+    # Handle Photo (Image Translation)
+    if photo:
+        await update.message.chat.send_action(action=constants.ChatAction.UPLOAD_PHOTO)
+        status_msg = await update.message.reply_text("🖼️ *Analyzing image...*", parse_mode='Markdown')
+        
+        try:
+            # Get largest photo
+            file_id = photo[-1].file_id
+            photo_file = await context.bot.get_file(file_id)
+            
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                input_path = os.path.join(tmp_dir, "image.jpg")
+                await photo_file.download_to_drive(input_path)
+                
+                translation = await translate_image(input_path, user_id)
+                
+                chunks = split_message(translation)
+                await status_msg.edit_text(chunks[0], parse_mode='Markdown')
+                for chunk in chunks[1:]:
+                    await update.message.reply_text(chunk, parse_mode='Markdown')
+            return
+        except Exception as e:
+            logger.error(f"Image processing error: {e}")
+            await status_msg.edit_text(f"❌ Error analyzing image: {str(e)}")
+            return
+
+    # Handle Audio/Voice (Voice Translation)
     await update.message.chat.send_action(action=constants.ChatAction.RECORD_VOICE)
     status_msg = await update.message.reply_text("📥 *Processing audio message...*", parse_mode='Markdown')
 
@@ -687,6 +761,59 @@ async def handle_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ **Thank you!** Your feedback has been submitted for review.", parse_mode='Markdown')
     else:
         await update.message.reply_text("❌ There was an error saving your feedback. Please try again later.")
+
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command to broadcast message to all users."""
+    # 1. Check Admin
+    if not await check_admin(update):
+        await update.message.reply_text("⛔ Admin only.")
+        return
+
+    # 2. Check Arguments
+    if not context.args:
+        await update.message.reply_text(
+            "📢 **Usage:** `/broadcast <message>`\n\n"
+            "Sends a message to ALL users. Supports Markdown.\n"
+            "Example: `/broadcast We have added Oran dialect! 🌅`",
+            parse_mode='Markdown'
+        )
+        return
+
+    message = ' '.join(context.args)
+    
+    # 3. Confirm (Optional safety step could be added here, but for now we proceed)
+    status_msg = await update.message.reply_text("📢 Starting broadcast...")
+    
+    # 4. Get all users
+    user_ids = await db.get_all_users()
+    total = len(user_ids)
+    sent = 0
+    failed = 0
+    
+    # 5. Send Loop
+    for uid in user_ids:
+        try:
+            await context.bot.send_message(chat_id=uid, text=message, parse_mode='Markdown')
+            sent += 1
+            # Sleep to respect Telegram limits (30 messages/second max global, but safer to go slower)
+            # 0.05s = 20 msgs/sec
+            await asyncio.sleep(0.05) 
+        except Exception as e:
+            failed += 1
+            logger.warning(f"Failed to broadcast to {uid}: {e}")
+            
+        # Update status every 100 users
+        if (sent + failed) % 100 == 0:
+            await status_msg.edit_text(f"📢 Broadcasting... {sent}/{total} sent ({failed} failed)")
+
+    # 6. Final Report
+    await status_msg.edit_text(
+        f"✅ **Broadcast Complete**\n\n"
+        f"📨 Sent: `{sent}`\n"
+        f"❌ Failed: `{failed}`\n"
+        f"👥 Total: `{total}`",
+        parse_mode='Markdown'
+    )
 
 async def review_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin: Review pending feedback."""

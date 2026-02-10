@@ -439,5 +439,11 @@ class Database:
             logger.error(f"Error adding verified translation: {e}")
             return False
 
+    async def get_all_users(self):
+        """Get all user IDs for broadcasting."""
+        cursor = await self.execute('SELECT user_id FROM users')
+        rows = await cursor.fetchall()
+        return [row[0] for row in rows]
+
 # Global DB instance
 db = Database()
