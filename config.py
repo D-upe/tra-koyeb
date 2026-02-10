@@ -7,7 +7,7 @@ load_dotenv()
 # ===== General Config =====
 PORT = int(os.environ.get("PORT", 8080))
 BASE_URL = os.environ.get("KOYEB_PUBLIC_URL", "").rstrip("/")
-ADMIN_CONTACT = "@Erivative"
+ADMIN_CONTACT = os.environ.get("ADMIN_CONTACT", "@Erivative")
 
 # ===== Database Config =====
 DATABASE_URL = os.environ.get("DATABASE_URL")
