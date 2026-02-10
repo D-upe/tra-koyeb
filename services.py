@@ -1,3 +1,4 @@
+import re
 import os
 import logging
 import asyncio
@@ -530,6 +531,18 @@ async def generate_tts_audio(text: str, dialect: str) -> str:
     try:
         # Determine voice - remove emojis/markdown if present
         clean_text = text.replace('*', '').replace('_', '')
+        
+        # Try to extract specifically the Darja part to improve pronunciation
+        # Look for "Darja: [Arabic text]" pattern
+        darja_match = re.search(r'Darja:\s*([^\n]+)', clean_text)
+        if darja_match:
+            # Found Darja section, only speak this part!
+            clean_text = darja_match.group(1).strip()
+            logger.info(f"Extracted Darja for TTS: {clean_text}")
+        else:
+            # Fallback: if input is short and looks like Arabic, speak it directly
+            # Otherwise the full text will be spoken (which might sound weird for mixed langs)
+            pass
         
         # Select voice based on dialect
         voice = TTS_VOICES.get(dialect, TTS_VOICES['fallback'])
