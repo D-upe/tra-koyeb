@@ -330,7 +330,7 @@ async def translate_text(text: str, user_id: int):
             await db.add_history(user_id, text)
             return f"⚡ *Cached*\n\n{cached}"
     
-    version_fallback = [DEFAULT_MODEL, "gemini-2.0-flash-exp", "gemini-2.5-flash", "gemini-1.5-flash"]
+    version_fallback = [DEFAULT_MODEL, "gemini-2.0-flash-lite-preview-02-05", "gemini-1.5-flash"]
     
     api_error = None
     
@@ -413,8 +413,8 @@ async def translate_image(file_path: str, user_id: int):
     dialect = user['dialect']
     
     # Use flash models which are faster/cheaper for vision
-    # gemini-2.0-flash-exp has excellent vision capabilities
-    version_fallback = ["gemini-2.0-flash-exp", "gemini-1.5-flash"]
+    # gemini-2.0-flash has excellent vision capabilities
+    version_fallback = ["gemini-2.0-flash", "gemini-2.0-flash-lite-preview-02-05", "gemini-1.5-flash"]
     
     api_error = None
     
@@ -468,7 +468,7 @@ async def translate_voice(file_path: str, user_id: int):
     user = await db.get_user(user_id)
     dialect = user['dialect']
     
-    version_fallback = [DEFAULT_MODEL, "gemini-2.0-flash-exp", "gemini-2.5-flash", "gemini-1.5-flash"]
+    version_fallback = [DEFAULT_MODEL, "gemini-2.0-flash-lite-preview-02-05", "gemini-1.5-flash"]
     
     api_error = None
     # 1. Try Gemini first (Best for Darja because of multimodal support)
